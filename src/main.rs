@@ -11,11 +11,11 @@ mod textsrc;
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use cli::{BomMode, Cli, Command};
 use document::{Detection, Document, ForcedEncoding};
-use encoding_util::{encode_text, BomKind};
+use encoding_util::{BomKind, encode_text};
 use error::{AppError, ErrorKind, Result};
 use lines::{Eol, EolMode, LineIndex, LineRange};
 use ops::{Ctx, OpOutcome};
@@ -115,7 +115,7 @@ fn cmd_guide(cli: &Cli, args: &cli::GuideArgs) -> Result<i32> {
                         .map(|s| s.key)
                         .collect::<Vec<_>>()
                         .join(", ")
-                )))
+                )));
             }
         },
     };
@@ -368,7 +368,7 @@ fn check_eol_mandate(cli: &Cli, doc: &Document) -> Result<()> {
                     }
                 ),
             )
-            .with_hint("pass --eol lf|crlf|cr"))
+            .with_hint("pass --eol lf|crlf|cr"));
         }
     };
 
@@ -838,7 +838,7 @@ fn as_range(value: &Value) -> Result<LineRange> {
             return Err(AppError::new(
                 ErrorKind::Usage,
                 format!("line range must be a string or number, got {other}"),
-            ))
+            ));
         }
     };
     s.parse::<LineRange>()
@@ -853,7 +853,7 @@ fn as_spec(value: &Value) -> Result<lines::LineSpec> {
             return Err(AppError::new(
                 ErrorKind::Usage,
                 format!("line must be a string or number, got {other}"),
-            ))
+            ));
         }
     };
     s.parse::<lines::LineSpec>()
@@ -896,7 +896,7 @@ fn cmd_batch(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -
                         i + 1
                     ),
                 )
-                .with_hint("intact batch FILE --script ..., or {\"op\":...,\"file\":\"path\"}"))
+                .with_hint("intact batch FILE --script ..., or {\"op\":...,\"file\":\"path\"}"));
             }
         };
 

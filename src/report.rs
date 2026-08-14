@@ -1,6 +1,6 @@
 //! Result reporting in both human and JSON form.
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::document::Document;
 use crate::error::AppError;

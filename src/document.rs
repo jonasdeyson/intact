@@ -14,10 +14,10 @@ use std::path::{Path, PathBuf};
 use encoding_rs::{Encoding, UTF_8};
 
 use crate::encoding_util::{
-    build_encoded_map, encode_text, is_stateful, sniff_bom, BomKind, EncodedMap, UnmappablePolicy,
+    BomKind, EncodedMap, UnmappablePolicy, build_encoded_map, encode_text, is_stateful, sniff_bom,
 };
 use crate::error::{AppError, ErrorKind, Result};
-use crate::lines::{detect_eol, Eol, LineIndex};
+use crate::lines::{Eol, LineIndex, detect_eol};
 
 /// How the file's encoding was determined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +110,7 @@ impl Document {
                     ErrorKind::NotFound,
                     format!("no such file: {}", path.display()),
                 )
-                .with_hint("use `intact create` to make a new file"))
+                .with_hint("use `intact create` to make a new file"));
             }
             Err(e) => return Err(AppError::from(e)),
         };

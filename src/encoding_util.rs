@@ -8,7 +8,7 @@
 
 use clap::ValueEnum;
 use encoding_rs::{
-    Encoder, EncoderResult, Encoding, ISO_2022_JP, REPLACEMENT, UTF_16BE, UTF_16LE, UTF_8,
+    Encoder, EncoderResult, Encoding, ISO_2022_JP, REPLACEMENT, UTF_8, UTF_16BE, UTF_16LE,
 };
 
 use crate::error::{AppError, ErrorKind, Result};
@@ -89,7 +89,9 @@ pub fn encoding_for_label(label: &str) -> Result<&'static Encoding> {
         if enc == REPLACEMENT {
             return Err(AppError::new(
                 ErrorKind::Usage,
-                format!("encoding label '{label}' maps to the WHATWG 'replacement' encoding, which cannot represent text"),
+                format!(
+                    "encoding label '{label}' maps to the WHATWG 'replacement' encoding, which cannot represent text"
+                ),
             ));
         }
         return Ok(enc);
@@ -280,8 +282,7 @@ pub fn build_encoded_map(enc: &'static Encoding, text: &str) -> Option<EncodedMa
 
 /// Guess the encoding of bytes that are not valid UTF-8 and carry no BOM.
 pub fn detect_legacy(bytes: &[u8]) -> &'static Encoding {
-    let mut detector =
-        chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
     detector.feed(bytes, true);
     detector.guess(None, chardetng::Utf8Detection::Allow)
 }

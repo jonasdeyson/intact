@@ -710,10 +710,12 @@ fn editing_through_a_symlink_writes_the_target() {
 
     // The edit lands in the target, and the link is still a link.
     assert_eq!(read(&real), b"th\xE9\nr\xE9sum\xE9\n".to_vec());
-    assert!(std::fs::symlink_metadata(&link)
-        .unwrap()
-        .file_type()
-        .is_symlink());
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 
     // A chain of links resolves the same way, as does a link into a
     // subdirectory written relative to the link's own location.
@@ -733,10 +735,12 @@ fn editing_through_a_symlink_writes_the_target() {
     ]);
     assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(read(&deep), b"y\n".to_vec());
-    assert!(std::fs::symlink_metadata(&second)
-        .unwrap()
-        .file_type()
-        .is_symlink());
+    assert!(
+        std::fs::symlink_metadata(&second)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }
 
 #[cfg(unix)]
@@ -790,10 +794,12 @@ fn a_symlink_loop_is_refused() {
     let a = sb.dir.join("a.txt");
     let out = run(&["create", a.to_str().unwrap(), "--text", "hello"]);
     assert_eq!(code(&out), 9, "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(std::fs::symlink_metadata(&a)
-        .unwrap()
-        .file_type()
-        .is_symlink());
+    assert!(
+        std::fs::symlink_metadata(&a)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }
 
 #[test]

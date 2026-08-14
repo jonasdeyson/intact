@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `similar` 2.7 to 3.1, and `chardetng` 0.1.17 to 1.0.
 - The minimum supported Rust version is 1.85, raised from 1.74 by `similar` 3,
   which is a Rust 2024 edition crate.
+- `intact` is built on the Rust 2024 edition, up from 2021.
 
 ## [0.2.0] - 2026-08-14
 

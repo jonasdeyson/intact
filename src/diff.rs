@@ -15,7 +15,7 @@
 
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use similar::{Algorithm, DiffOp, TextDiff};
 
 use crate::document::Edit;
@@ -240,13 +240,13 @@ fn edit_ops(
             return None;
         }
         let equal = a - old_cursor;
-        ops.extend(std::iter::repeat(Op::Equal).take(equal));
+        ops.extend(std::iter::repeat_n(Op::Equal, equal));
         old_cursor += equal;
         new_cursor += equal;
 
         // Removed: the old lines the group covers.
         if b >= a {
-            ops.extend(std::iter::repeat(Op::Delete).take(b - a + 1));
+            ops.extend(std::iter::repeat_n(Op::Delete, b - a + 1));
             old_cursor = b + 1;
         }
 
@@ -278,7 +278,10 @@ fn edit_ops(
             if new_start_line != new_cursor {
                 return None;
             }
-            ops.extend(std::iter::repeat(Op::Insert).take(new_end_line - new_start_line + 1));
+            ops.extend(std::iter::repeat_n(
+                Op::Insert,
+                new_end_line - new_start_line + 1,
+            ));
             new_cursor = new_end_line + 1;
         }
 
@@ -291,7 +294,7 @@ fn edit_ops(
     if old_tail != new_tail {
         return None;
     }
-    ops.extend(std::iter::repeat(Op::Equal).take(old_tail));
+    ops.extend(std::iter::repeat_n(Op::Equal, old_tail));
 
     let consumed_old = ops.iter().filter(|o| **o != Op::Insert).count();
     let consumed_new = ops.iter().filter(|o| **o != Op::Delete).count();
@@ -332,7 +335,7 @@ fn text_ops(a: &[&str], b: &[&str]) -> Vec<Op> {
         .deadline(Instant::now() + DIFF_DEADLINE);
 
     let mut ops = Vec::with_capacity(a.len() + b.len());
-    let repeat = |ops: &mut Vec<Op>, op: Op, n: usize| ops.extend(std::iter::repeat(op).take(n));
+    let repeat = |ops: &mut Vec<Op>, op: Op, n: usize| ops.extend(std::iter::repeat_n(op, n));
     for op in config.diff_slices(a, b).ops() {
         match *op {
             DiffOp::Equal { len, .. } => repeat(&mut ops, Op::Equal, len),
