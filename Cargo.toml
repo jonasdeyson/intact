@@ -6,7 +6,7 @@ rust-version = "1.74"
 description = "An encoding-preserving command-line text editor."
 license = "MIT"
 readme = "README.md"
-repository = "https://gitlab.com/jonasdeyson/intact"
+repository = "https://github.com/jonasdeyson/intact"
 keywords = ["encoding", "charset", "editor", "cli", "text"]
 categories = ["command-line-utilities", "text-processing", "encoding"]
 
