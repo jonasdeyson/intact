@@ -1,0 +1,28 @@
+[package]
+name = "intact"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "An encoding-preserving command-line text editor."
+license = "MIT"
+readme = "README.md"
+repository = "https://gitlab.com/jonasdeyson/intact"
+keywords = ["encoding", "charset", "editor", "cli", "text"]
+categories = ["command-line-utilities", "text-processing", "encoding"]
+
+[[bin]]
+name = "intact"
+path = "src/main.rs"
+
+[dependencies]
+chardetng = "0.1"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+encoding_rs = "0.8"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

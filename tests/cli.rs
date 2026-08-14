@@ -1,0 +1,1172 @@
+//! End-to-end tests driving the real binary against real files.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+const EXE: &str = env!("CARGO_BIN_EXE_intact");
+
+struct Sandbox {
+    dir: PathBuf,
+}
+
+impl Sandbox {
+    fn new(name: &str) -> Sandbox {
+        let dir = std::env::temp_dir().join(format!("intact-test-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Sandbox { dir }
+    }
+
+    fn file(&self, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = self.dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn run(args: &[&str]) -> Output {
+    Command::new(EXE)
+        .args(args)
+        .output()
+        .expect("failed to run intact")
+}
+
+fn code(out: &Output) -> i32 {
+    out.status.code().unwrap_or(-1)
+}
+
+fn read(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap()
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+// windows-1252 bytes for "café\nrésumé\n"
+const LATIN1: &[u8] = b"caf\xE9\nr\xE9sum\xE9\n";
+
+#[test]
+fn latin1_file_stays_latin1() {
+    let sb = Sandbox::new("latin1");
+    let f = sb.file("a.txt", LATIN1);
+    let p = f.to_str().unwrap();
+
+    let out = run(&["replace", p, "--find", "café", "--with", "thé"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), b"th\xE9\nr\xE9sum\xE9\n".to_vec());
+}
+
+#[test]
+fn repeated_edits_do_not_accumulate_mojibake() {
+    let sb = Sandbox::new("repeat");
+    let f = sb.file("a.txt", LATIN1);
+    let p = f.to_str().unwrap();
+
+    for _ in 0..5 {
+        assert_eq!(
+            code(&run(&["replace", p, "--find", "café", "--with", "café"])),
+            0
+        );
+    }
+    assert_eq!(read(&f), LATIN1.to_vec());
+}
+
+#[test]
+fn inserted_text_is_transcoded_into_the_file_encoding() {
+    let sb = Sandbox::new("insert");
+    let f = sb.file("a.txt", LATIN1);
+    let p = f.to_str().unwrap();
+
+    let out = run(&["insert", p, "--line", "2", "--text", "à côté"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        read(&f),
+        b"caf\xE9\n\xE0 c\xF4t\xE9\nr\xE9sum\xE9\n".to_vec()
+    );
+}
+
+#[test]
+fn unmappable_text_is_refused_and_nothing_is_written() {
+    let sb = Sandbox::new("unmappable");
+    let f = sb.file("a.txt", LATIN1);
+    let p = f.to_str().unwrap();
+
+    let out = run(&["replace", p, "--find", "café", "--with", "日本語"]);
+    assert_eq!(code(&out), 5);
+    assert_eq!(read(&f), LATIN1.to_vec());
+
+    // ... unless a policy is chosen.
+    let out = run(&[
+        "replace",
+        p,
+        "--find",
+        "café",
+        "--with",
+        "日本語",
+        "--unmappable",
+        "xml",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        read(&f),
+        b"&#26085;&#26412;&#35486;\nr\xE9sum\xE9\n".to_vec()
+    );
+}
+
+#[test]
+fn ambiguous_match_is_refused() {
+    let sb = Sandbox::new("ambiguous");
+    let f = sb.file("a.txt", b"x\nx\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&["replace", p, "--find", "x", "--with", "y"]);
+    assert_eq!(code(&out), 4);
+    assert_eq!(read(&f), b"x\nx\n".to_vec());
+
+    assert_eq!(
+        code(&run(&["replace", p, "--find", "x", "--with", "y", "--all"])),
+        0
+    );
+    assert_eq!(read(&f), b"y\ny\n".to_vec());
+}
+
+#[test]
+fn missing_match_exits_three() {
+    let sb = Sandbox::new("nomatch");
+    let f = sb.file("a.txt", b"hello\n");
+    let out = run(&[
+        "replace",
+        f.to_str().unwrap(),
+        "--find",
+        "nope",
+        "--with",
+        "x",
+    ]);
+    assert_eq!(code(&out), 3);
+}
+
+#[test]
+fn crlf_line_endings_survive_and_are_used_for_new_text() {
+    let sb = Sandbox::new("crlf");
+    let f = sb.file("a.txt", b"one\r\ntwo\r\n");
+    let p = f.to_str().unwrap();
+
+    assert_eq!(
+        code(&run(&["insert", p, "--after", "1", "--text", "mid"])),
+        0
+    );
+    assert_eq!(read(&f), b"one\r\nmid\r\ntwo\r\n".to_vec());
+
+    assert_eq!(code(&run(&["append", p, "--text", "end"])), 0);
+    assert_eq!(read(&f), b"one\r\nmid\r\ntwo\r\nend\r\n".to_vec());
+}
+
+#[test]
+fn multiline_text_via_escapes() {
+    let sb = Sandbox::new("escapes");
+    let f = sb.file("a.txt", b"one\r\n");
+    let p = f.to_str().unwrap();
+
+    assert_eq!(
+        code(&run(&["append", p, "--escapes", "--text", "a\\nb"])),
+        0
+    );
+    assert_eq!(read(&f), b"one\r\na\r\nb\r\n".to_vec());
+}
+
+#[test]
+fn delete_and_replace_lines() {
+    let sb = Sandbox::new("lines");
+    let f = sb.file("a.txt", b"1\n2\n3\n4\n5\n");
+    let p = f.to_str().unwrap();
+
+    assert_eq!(code(&run(&["delete", p, "--lines", "2:3"])), 0);
+    assert_eq!(read(&f), b"1\n4\n5\n".to_vec());
+
+    assert_eq!(
+        code(&run(&[
+            "replace-lines",
+            p,
+            "--lines",
+            "$",
+            "--text",
+            "last"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"1\n4\nlast\n".to_vec());
+
+    assert_eq!(code(&run(&["delete", p, "--lines", "-2:-1"])), 0);
+    assert_eq!(read(&f), b"1\n".to_vec());
+}
+
+#[test]
+fn file_without_trailing_newline_is_respected() {
+    let sb = Sandbox::new("notrailing");
+    let f = sb.file("a.txt", b"one\ntwo");
+    let p = f.to_str().unwrap();
+
+    assert_eq!(
+        code(&run(&["replace-lines", p, "--lines", "2", "--text", "TWO"])),
+        0
+    );
+    assert_eq!(read(&f), b"one\nTWO".to_vec());
+
+    // Appending has to start the new line itself.
+    assert_eq!(code(&run(&["append", p, "--text", "three"])), 0);
+    assert_eq!(read(&f), b"one\nTWO\nthree\n".to_vec());
+}
+
+#[test]
+fn out_of_range_line_exits_six() {
+    let sb = Sandbox::new("range");
+    let f = sb.file("a.txt", b"1\n2\n");
+    assert_eq!(
+        code(&run(&["delete", f.to_str().unwrap(), "--lines", "9"])),
+        6
+    );
+}
+
+#[test]
+fn bom_is_preserved() {
+    let sb = Sandbox::new("bom");
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice("héllo\n".as_bytes());
+    let f = sb.file("a.txt", &bytes);
+
+    assert_eq!(
+        code(&run(&[
+            "replace",
+            f.to_str().unwrap(),
+            "--find",
+            "héllo",
+            "--with",
+            "wörld"
+        ])),
+        0
+    );
+    let mut expected = vec![0xEF, 0xBB, 0xBF];
+    expected.extend_from_slice("wörld\n".as_bytes());
+    assert_eq!(read(&f), expected);
+}
+
+#[test]
+fn utf16_file_round_trips() {
+    let sb = Sandbox::new("utf16");
+    let mut bytes = vec![0xFF, 0xFE];
+    for u in "alpha\nbeta\n".encode_utf16() {
+        bytes.extend_from_slice(&u.to_le_bytes());
+    }
+    let f = sb.file("a.txt", &bytes);
+
+    assert_eq!(
+        code(&run(&[
+            "replace",
+            f.to_str().unwrap(),
+            "--find",
+            "beta",
+            "--with",
+            "gämma"
+        ])),
+        0
+    );
+    let mut expected = vec![0xFF, 0xFE];
+    for u in "alpha\ngämma\n".encode_utf16() {
+        expected.extend_from_slice(&u.to_le_bytes());
+    }
+    assert_eq!(read(&f), expected);
+}
+
+#[test]
+fn info_reports_detected_encoding() {
+    let sb = Sandbox::new("info");
+    let f = sb.file("a.txt", LATIN1);
+    let out = run(&["--json", "info", f.to_str().unwrap()]);
+    assert_eq!(code(&out), 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["roundtrip_safe"], true);
+    assert_eq!(v["lines"], 2);
+    assert_eq!(v["eol"], "lf");
+    // chardetng picks a single-byte encoding; the exact guess may vary, but the
+    // file must round-trip through it.
+    assert!(v["encoding"].as_str().unwrap().len() > 2);
+}
+
+#[test]
+fn explicit_encoding_overrides_detection() {
+    let sb = Sandbox::new("explicit");
+    let f = sb.file("a.txt", LATIN1);
+    let out = run(&[
+        "--json",
+        "--encoding",
+        "windows-1252",
+        "info",
+        f.to_str().unwrap(),
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["encoding"], "windows-1252");
+    assert_eq!(v["detected_by"], "explicit");
+}
+
+#[test]
+fn convert_changes_encoding() {
+    let sb = Sandbox::new("convert");
+    let f = sb.file("a.txt", LATIN1);
+    let p = f.to_str().unwrap();
+
+    let out = run(&["--encoding", "windows-1252", "convert", p, "--to", "utf-8"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), "café\nrésumé\n".as_bytes().to_vec());
+
+    // And back again.
+    assert_eq!(code(&run(&["convert", p, "--to", "windows-1252"])), 0);
+    assert_eq!(read(&f), LATIN1.to_vec());
+}
+
+#[test]
+fn dry_run_writes_nothing() {
+    let sb = Sandbox::new("dryrun");
+    let f = sb.file("a.txt", b"one\ntwo\n");
+    let out = run(&[
+        "--dry-run",
+        "replace",
+        f.to_str().unwrap(),
+        "--find",
+        "one",
+        "--with",
+        "1",
+    ]);
+    assert_eq!(code(&out), 0);
+    assert_eq!(read(&f), b"one\ntwo\n".to_vec());
+    assert!(stdout(&out).contains("-one"));
+    assert!(stdout(&out).contains("+1"));
+}
+
+#[test]
+fn backup_keeps_the_original() {
+    let sb = Sandbox::new("backup");
+    let f = sb.file("a.txt", LATIN1);
+    assert_eq!(
+        code(&run(&[
+            "--backup",
+            "replace",
+            f.to_str().unwrap(),
+            "--find",
+            "café",
+            "--with",
+            "the"
+        ])),
+        0
+    );
+    let bak = sb.dir.join("a.txt.bak");
+    assert_eq!(read(&bak), LATIN1.to_vec());
+}
+
+#[cfg(unix)]
+#[test]
+fn editing_through_a_symlink_writes_the_target() {
+    let sb = Sandbox::new("symlink");
+    let real = sb.file("real.txt", LATIN1);
+    let link = sb.dir.join("link.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let out = run(&[
+        "replace",
+        link.to_str().unwrap(),
+        "--find",
+        "café",
+        "--with",
+        "thé",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    // The edit lands in the target, and the link is still a link.
+    assert_eq!(read(&real), b"th\xE9\nr\xE9sum\xE9\n".to_vec());
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    // A chain of links resolves the same way, as does a link into a
+    // subdirectory written relative to the link's own location.
+    let sub = sb.dir.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let deep = sb.file("sub/deep.txt", b"x\n");
+    std::os::unix::fs::symlink("sub/deep.txt", sb.dir.join("first.txt")).unwrap();
+    std::os::unix::fs::symlink("first.txt", sb.dir.join("second.txt")).unwrap();
+    let second = sb.dir.join("second.txt");
+    let out = run(&[
+        "replace",
+        second.to_str().unwrap(),
+        "--find",
+        "x",
+        "--with",
+        "y",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&deep), b"y\n".to_vec());
+    assert!(std::fs::symlink_metadata(&second)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_is_named_in_the_result() {
+    let sb = Sandbox::new("symreport");
+    let real = sb.file("real.txt", b"hello\n");
+    let link = sb.dir.join("link.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let p = link.to_str().unwrap();
+
+    // The human line names both the path given and the file written.
+    let out = run(&["replace", p, "--find", "hello", "--with", "hey"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stdout(&out).contains(&format!("{p} -> {}", real.display())),
+        "{}",
+        stdout(&out)
+    );
+
+    // JSON carries the target as resolved_path, alongside the path as typed.
+    let out = run(&["--json", "replace", p, "--find", "hey", "--with", "hello"]);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["path"], p);
+    assert_eq!(v["resolved_path"], real.display().to_string());
+
+    // info reports it too.
+    let out = run(&["--json", "info", p]);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["resolved_path"], real.display().to_string());
+    assert!(stdout(&run(&["info", p])).contains("symlink to:"));
+
+    // An ordinary file gains neither the arrow nor the field.
+    let q = real.to_str().unwrap();
+    let out = run(&["replace", q, "--find", "hello", "--with", "hey"]);
+    assert!(!stdout(&out).contains(" -> "), "{}", stdout(&out));
+    let out = run(&["--json", "info", q]);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert!(v.get("resolved_path").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_loop_is_refused() {
+    let sb = Sandbox::new("symloop");
+    std::os::unix::fs::symlink("b.txt", sb.dir.join("a.txt")).unwrap();
+    std::os::unix::fs::symlink("a.txt", sb.dir.join("b.txt")).unwrap();
+
+    // The loop is refused (the read hits ELOOP first), and neither link is
+    // replaced by a regular file behind the user's back.
+    let a = sb.dir.join("a.txt");
+    let out = run(&["create", a.to_str().unwrap(), "--text", "hello"]);
+    assert_eq!(code(&out), 9, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(std::fs::symlink_metadata(&a)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
+fn search_reports_positions_and_exit_code() {
+    let sb = Sandbox::new("search");
+    let f = sb.file("a.txt", LATIN1);
+    let p = f.to_str().unwrap();
+
+    let out = run(&["--json", "search", p, "--find", "é"]);
+    assert_eq!(code(&out), 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["count"], 3);
+    assert_eq!(v["matches"][0]["line"], 1);
+    assert_eq!(v["matches"][0]["column"], 4);
+
+    assert_eq!(code(&run(&["search", p, "--find", "zzz"])), 3);
+    assert_eq!(
+        code(&run(&["search", p, "--find", "zzz", "--allow-empty"])),
+        0
+    );
+}
+
+#[test]
+fn regex_replace_with_capture_groups() {
+    let sb = Sandbox::new("regex");
+    let f = sb.file("a.py", b"def foo(a, b):\ndef bar(c):\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&[
+        "replace",
+        p,
+        "--regex",
+        "--all",
+        "--find",
+        r"def (\w+)\(",
+        "--with",
+        "def test_$1(",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        read(&f),
+        b"def test_foo(a, b):\ndef test_bar(c):\n".to_vec()
+    );
+}
+
+#[test]
+fn replace_restricted_to_a_line_range() {
+    let sb = Sandbox::new("region");
+    let f = sb.file("a.txt", b"x\nx\nx\n");
+    let p = f.to_str().unwrap();
+    let out = run(&["replace", p, "--find", "x", "--with", "y", "--lines", "2"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), b"x\ny\nx\n".to_vec());
+}
+
+#[test]
+fn view_prints_requested_lines() {
+    let sb = Sandbox::new("view");
+    let f = sb.file("a.txt", LATIN1);
+    let out = run(&["view", f.to_str().unwrap(), "--lines", "2", "--number"]);
+    assert_eq!(code(&out), 0);
+    assert_eq!(stdout(&out), "     2\trésumé\n");
+}
+
+#[test]
+fn create_refuses_to_clobber() {
+    let sb = Sandbox::new("create");
+    let f = sb.file("a.txt", b"existing\n");
+    assert_eq!(
+        code(&run(&["create", f.to_str().unwrap(), "--text", "new"])),
+        7
+    );
+
+    let g = sb.dir.join("new.txt");
+    let out = run(&[
+        "--encoding",
+        "windows-1252",
+        "create",
+        g.to_str().unwrap(),
+        "--text",
+        "café",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&g), b"caf\xE9\n".to_vec());
+}
+
+#[test]
+fn batch_applies_operations_atomically() {
+    let sb = Sandbox::new("batch");
+    let f = sb.file("a.txt", LATIN1);
+    let script = sb.file(
+        "script.json",
+        r#"{"ops":[
+              {"op":"replace","find":"café","with":"thé"},
+              {"op":"append","text":"à demain"},
+              {"op":"insert","line":1,"text":"début"}
+            ]}"#
+        .as_bytes(),
+    );
+
+    let out = run(&[
+        "batch",
+        f.to_str().unwrap(),
+        "--script",
+        script.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        read(&f),
+        b"d\xE9but\nth\xE9\nr\xE9sum\xE9\n\xE0 demain\n".to_vec()
+    );
+}
+
+#[test]
+fn batch_failure_leaves_the_file_untouched() {
+    let sb = Sandbox::new("batchfail");
+    let f = sb.file("a.txt", LATIN1);
+    let script = sb.file(
+        "script.json",
+        r#"[{"op":"replace","find":"café","with":"thé"},
+            {"op":"replace","find":"missing","with":"x"}]"#
+            .as_bytes(),
+    );
+    let out = run(&[
+        "batch",
+        f.to_str().unwrap(),
+        "--script",
+        script.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), 3);
+    assert_eq!(read(&f), LATIN1.to_vec());
+}
+
+#[test]
+fn undecodable_file_is_refused_without_lossy() {
+    let sb = Sandbox::new("broken");
+    // A lone 0x80 is not valid UTF-8; force UTF-8 so detection cannot rescue it.
+    let f = sb.file("a.txt", b"ok\x80\nline\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&[
+        "--encoding",
+        "utf-8",
+        "replace",
+        p,
+        "--find",
+        "line",
+        "--with",
+        "row",
+    ]);
+    assert_eq!(code(&out), 5);
+    assert_eq!(read(&f), b"ok\x80\nline\n".to_vec());
+
+    let out = run(&[
+        "--encoding",
+        "utf-8",
+        "--lossy",
+        "replace",
+        p,
+        "--find",
+        "line",
+        "--with",
+        "row",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn binary_files_are_refused_by_default() {
+    let sb = Sandbox::new("binary");
+    let f = sb.file("a.bin", b"abc\x00def\n");
+    let out = run(&[
+        "replace",
+        f.to_str().unwrap(),
+        "--find",
+        "abc",
+        "--with",
+        "xyz",
+    ]);
+    assert_eq!(code(&out), 5);
+}
+
+#[test]
+fn missing_file_exits_eight() {
+    let sb = Sandbox::new("missing");
+    let f = sb.dir.join("nope.txt");
+    assert_eq!(code(&run(&["view", f.to_str().unwrap()])), 8);
+}
+
+#[test]
+fn creating_an_empty_file_actually_creates_it() {
+    let sb = Sandbox::new("emptycreate");
+    let f = sb.dir.join("empty.txt");
+    assert_eq!(
+        code(&run(&["create", f.to_str().unwrap(), "--text", ""])),
+        0
+    );
+    assert!(f.exists(), "create with empty text did not create the file");
+    assert_eq!(read(&f), Vec::<u8>::new());
+
+    let g = sb.dir.join("blank.txt");
+    assert_eq!(code(&run(&["write", g.to_str().unwrap(), "--text", ""])), 0);
+    assert!(g.exists(), "write with empty text did not create the file");
+}
+
+#[test]
+fn missing_parent_directory_is_explained_and_creatable() {
+    let sb = Sandbox::new("parents");
+    let f = sb.dir.join("src/components/Foo.tsx");
+    let p = f.to_str().unwrap();
+
+    let out = run(&["create", p, "--text", "x"]);
+    assert_eq!(code(&out), 8);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("does not exist"), "unhelpful error: {err}");
+    assert!(
+        err.contains("--parents"),
+        "error does not mention the fix: {err}"
+    );
+
+    assert_eq!(code(&run(&["create", p, "--parents", "--text", "x"])), 0);
+    assert_eq!(read(&f), b"x\n".to_vec());
+
+    let g = sb.dir.join("a/b/c.txt");
+    assert_eq!(
+        code(&run(&["write", g.to_str().unwrap(), "-p", "--text", "hi"])),
+        0
+    );
+    assert_eq!(read(&g), b"hi\n".to_vec());
+}
+
+fn run_env(env: &[(&str, &str)], args: &[&str]) -> Output {
+    let mut cmd = Command::new(EXE);
+    cmd.args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("failed to run intact")
+}
+
+/// A project that mandates one encoding must be able to pin it once, rather
+/// than depending on every invocation remembering --encoding.
+#[test]
+fn env_encoding_pins_the_encoding_for_every_command() {
+    let sb = Sandbox::new("envenc");
+    let env = [("INTACT_ENCODING", "latin1")];
+
+    // A new file is created in the mandated encoding, not UTF-8.
+    let f = sb.dir.join("notes.txt");
+    let p = f.to_str().unwrap();
+    assert_eq!(
+        code(&run_env(&env, &["create", p, "--text", "Olá mundo"])),
+        0
+    );
+    assert_eq!(read(&f), b"Ol\xE1 mundo\n".to_vec());
+
+    // Edits use it too, with no detection in play. This exact edit fails when
+    // the encoding is guessed, because a short file can be read as
+    // windows-1250, which has no 'ã'.
+    let out = run_env(&env, &["replace", p, "--find", "mundo", "--with", "mundão"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), b"Ol\xE1 mund\xE3o\n".to_vec());
+
+    // info attributes the encoding to the environment.
+    let out = run_env(&env, &["--json", "info", p]);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["encoding"], "windows-1252");
+    assert_eq!(v["detected_by"], "environment");
+
+    // An explicit flag still wins over the environment.
+    let out = run_env(&env, &["--json", "--encoding", "utf-8", "info", p]);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["encoding"], "UTF-8");
+    assert_eq!(v["detected_by"], "explicit");
+
+    // A bad label in the environment is reported as such, not ignored.
+    let out = run_env(&[("INTACT_ENCODING", "nonsense-9")], &["info", p]);
+    assert_eq!(code(&out), 2);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("INTACT_ENCODING"));
+}
+
+#[test]
+fn no_guess_refuses_writes_to_undeclared_encodings() {
+    let sb = Sandbox::new("noguess");
+    let f = sb.file("a.txt", LATIN1);
+    let p = f.to_str().unwrap();
+
+    // Guessed encoding + strict mode = refusal, by flag or by environment.
+    let out = run(&[
+        "--no-guess",
+        "replace",
+        p,
+        "--find",
+        "café",
+        "--with",
+        "thé",
+    ]);
+    assert_eq!(code(&out), 5);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("guessed"));
+    assert_eq!(read(&f), LATIN1.to_vec());
+
+    let out = run_env(
+        &[("INTACT_NO_GUESS", "1")],
+        &["replace", p, "--find", "café", "--with", "thé"],
+    );
+    assert_eq!(code(&out), 5);
+
+    // Declaring the encoding satisfies it.
+    let out = run(&[
+        "--no-guess",
+        "--encoding",
+        "latin1",
+        "replace",
+        p,
+        "--find",
+        "café",
+        "--with",
+        "thé",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    // Read-only commands still work, so a tripped guard can be diagnosed.
+    assert_eq!(code(&run(&["--no-guess", "info", p])), 0);
+    assert_eq!(code(&run(&["--no-guess", "view", p])), 0);
+
+    // A UTF-8 file is not a guess, so strict mode does not touch it.
+    let g = sb.file("b.txt", "héllo\n".as_bytes());
+    assert_eq!(
+        code(&run(&[
+            "--no-guess",
+            "replace",
+            g.to_str().unwrap(),
+            "--find",
+            "héllo",
+            "--with",
+            "hi"
+        ])),
+        0
+    );
+}
+
+/// The line-ending equivalent of the encoding mandate.
+#[test]
+fn env_eol_pins_line_endings_for_every_command() {
+    let sb = Sandbox::new("enveol");
+    let env = [("INTACT_EOL", "crlf")];
+
+    // A new file gets the mandated endings, not the LF default.
+    let f = sb.dir.join("new.txt");
+    let p = f.to_str().unwrap();
+    assert_eq!(
+        code(&run_env(
+            &env,
+            &["create", p, "--escapes", "--text", "a\\nb"]
+        )),
+        0
+    );
+    assert_eq!(read(&f), b"a\r\nb\r\n".to_vec());
+
+    // Inserted text too.
+    assert_eq!(code(&run_env(&env, &["append", p, "--text", "c"])), 0);
+    assert_eq!(read(&f), b"a\r\nb\r\nc\r\n".to_vec());
+
+    // The flag still overrides the environment.
+    let g = sb.dir.join("lf.txt");
+    assert_eq!(
+        code(&run_env(
+            &env,
+            &[
+                "create",
+                g.to_str().unwrap(),
+                "--eol",
+                "lf",
+                "--escapes",
+                "--text",
+                "a\\nb"
+            ]
+        )),
+        0
+    );
+    assert_eq!(read(&g), b"a\nb\n".to_vec());
+
+    // A bad value names the variable.
+    let out = run_env(&[("INTACT_EOL", "wobbly")], &["view", p]);
+    assert_eq!(code(&out), 2);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("INTACT_EOL"));
+}
+
+#[test]
+fn strict_eol_refuses_to_create_mixed_endings() {
+    let sb = Sandbox::new("strricteol");
+    let f = sb.file("lf.txt", b"one\ntwo\n");
+    let p = f.to_str().unwrap();
+
+    // Appending CRLF text to an LF file would leave it mixed: refuse instead.
+    let out = run(&[
+        "--eol",
+        "crlf",
+        "--strict-eol",
+        "append",
+        p,
+        "--text",
+        "three",
+    ]);
+    assert_eq!(code(&out), 5);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not CRLF"), "{err}");
+    assert!(err.contains("--newlines crlf"), "hint missing: {err}");
+    assert_eq!(read(&f), b"one\ntwo\n".to_vec());
+
+    // Same via the environment.
+    assert_eq!(
+        code(&run_env(
+            &[("INTACT_EOL", "crlf"), ("INTACT_STRICT_EOL", "1")],
+            &["append", p, "--text", "three"]
+        )),
+        5
+    );
+
+    // The suggested remedy needs no --to, and then the edit succeeds.
+    assert_eq!(code(&run(&["convert", p, "--newlines", "crlf"])), 0);
+    assert_eq!(read(&f), b"one\r\ntwo\r\n".to_vec());
+    assert_eq!(
+        code(&run(&[
+            "--eol",
+            "crlf",
+            "--strict-eol",
+            "append",
+            p,
+            "--text",
+            "three"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"one\r\ntwo\r\nthree\r\n".to_vec());
+
+    // A conforming file is untouched by the guard, and write/create are exempt
+    // because they replace the whole content anyway.
+    let g = sb.file("mixed.txt", b"a\r\nb\n");
+    assert_eq!(
+        code(&run(&[
+            "--eol",
+            "crlf",
+            "--strict-eol",
+            "write",
+            g.to_str().unwrap(),
+            "--text",
+            "x"
+        ])),
+        0
+    );
+
+    // The guard needs a concrete style to enforce.
+    let out = run(&["--strict-eol", "append", p, "--text", "z"]);
+    assert_eq!(code(&out), 2);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--eol"));
+}
+
+#[test]
+fn convert_can_normalise_line_endings_alone() {
+    let sb = Sandbox::new("convertnl");
+    // A Latin-1 file with mixed endings: fix the endings, keep the encoding.
+    let f = sb.file("a.txt", b"caf\xE9\r\nth\xE9\nfin\r\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&["--encoding", "latin1", "convert", p, "--newlines", "lf"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), b"caf\xE9\nth\xE9\nfin\n".to_vec());
+
+    // `auto` collapses mixed endings onto the file's own dominant style.
+    let g = sb.file("b.txt", b"a\r\nb\r\nc\n");
+    assert_eq!(
+        code(&run(&[
+            "convert",
+            g.to_str().unwrap(),
+            "--newlines",
+            "auto"
+        ])),
+        0
+    );
+    assert_eq!(read(&g), b"a\r\nb\r\nc\r\n".to_vec());
+
+    // Neither --to nor --newlines is a usage error.
+    assert_eq!(code(&run(&["convert", p])), 2);
+}
+
+#[test]
+fn instructions_can_state_a_project_encoding_mandate() {
+    let text = stdout(&run(&["instructions", "--encoding", "latin1"]));
+    assert!(text.contains("Encoding: always `windows-1252`"));
+    assert!(text.contains("INTACT_ENCODING=windows-1252"));
+    assert!(text.contains("INTACT_NO_GUESS=1"));
+
+    let brief = stdout(&run(&[
+        "instructions",
+        "--brief",
+        "--encoding",
+        "shift_jis",
+    ]));
+    assert!(brief.contains("Shift_JIS"));
+
+    // Without the flag, no encoding policy is asserted.
+    let plain = stdout(&run(&["instructions"]));
+    assert!(!plain.contains("INTACT_ENCODING"));
+}
+
+#[test]
+fn instructions_can_state_a_line_ending_mandate() {
+    let text = stdout(&run(&["instructions", "--eol", "crlf"]));
+    assert!(text.contains("Line endings: always CRLF"));
+    assert!(text.contains("INTACT_EOL=crlf"));
+    assert!(text.contains("INTACT_STRICT_EOL=1"));
+    assert!(text.contains("--newlines crlf"));
+
+    // Both mandates can appear together.
+    let both = stdout(&run(&[
+        "instructions",
+        "--encoding",
+        "latin1",
+        "--eol",
+        "lf",
+    ]));
+    assert!(both.contains("Encoding: always `windows-1252`"));
+    assert!(both.contains("Line endings: always LF"));
+
+    let brief = stdout(&run(&["instructions", "--brief", "--eol", "crlf"]));
+    assert!(brief.contains("INTACT_EOL=crlf"));
+
+    // `auto` is not a mandate, so nothing is asserted.
+    let plain = stdout(&run(&["instructions", "--eol", "auto"]));
+    assert!(!plain.contains("INTACT_EOL"));
+}
+
+/// The binary must be self-documenting: everything reachable from --help.
+#[test]
+fn every_command_has_working_help() {
+    let commands = [
+        "info",
+        "view",
+        "search",
+        "replace",
+        "insert",
+        "append",
+        "prepend",
+        "delete",
+        "replace-lines",
+        "write",
+        "create",
+        "convert",
+        "batch",
+        "encodings",
+        "guide",
+        "instructions",
+    ];
+    let top = run(&["--help"]);
+    assert_eq!(code(&top), 0);
+    let top_text = stdout(&top);
+    for command in commands {
+        let out = run(&[command, "--help"]);
+        assert_eq!(code(&out), 0, "`{command} --help` failed");
+        assert!(
+            !stdout(&out).is_empty(),
+            "`{command} --help` printed nothing"
+        );
+
+        // Every command must be listed in the top-level help, or it is not
+        // discoverable from the entry point.
+        assert!(
+            top_text.contains(command),
+            "top-level help does not mention `{command}`"
+        );
+
+        // ... and reachable through `intact help CMD` too.
+        assert_eq!(code(&run(&["help", command])), 0, "`help {command}` failed");
+    }
+    // The entry point points at the deeper documentation.
+    assert!(top_text.contains("intact guide"));
+    assert!(top_text.contains("intact COMMAND --help"));
+}
+
+#[test]
+fn guide_serves_the_whole_manual() {
+    let list = run(&["guide", "--list"]);
+    assert_eq!(code(&list), 0);
+    let topics = [
+        "overview",
+        "safety",
+        "encoding",
+        "ranges",
+        "text",
+        "exit-codes",
+        "json",
+        "batch",
+        "recipes",
+    ];
+    for topic in topics {
+        assert!(
+            stdout(&list).contains(topic),
+            "`guide --list` omits `{topic}`"
+        );
+        let out = run(&["guide", topic]);
+        assert_eq!(code(&out), 0, "`guide {topic}` failed");
+        assert!(
+            stdout(&out).len() > 200,
+            "`guide {topic}` is suspiciously short"
+        );
+    }
+
+    let all = run(&["guide"]);
+    assert_eq!(code(&all), 0);
+    for topic in topics {
+        assert!(stdout(&all).contains(topic), "full manual omits `{topic}`");
+    }
+
+    let out = run(&["guide", "nonsense"]);
+    assert_eq!(code(&out), 2);
+}
+
+#[test]
+fn guide_is_available_as_json() {
+    let out = run(&["--json", "guide", "ranges"]);
+    assert_eq!(code(&out), 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["ok"], true);
+    assert!(v["content"].as_str().unwrap().contains("1-based"));
+    assert_eq!(v["topics"].as_array().unwrap().len(), 9);
+}
+
+#[test]
+fn instructions_generate_a_pasteable_section() {
+    let out = run(&["instructions"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.starts_with("## "));
+    assert!(text.contains("only tool permitted to write to a file"));
+    assert!(text.contains("intact replace FILE --find TEXT --with TEXT"));
+    assert!(text.contains("intact guide"));
+
+    let brief = stdout(&run(&["instructions", "--brief"]));
+    assert!(brief.len() < text.len());
+    assert!(brief.contains("only tool permitted to write to a file"));
+
+    // The invocation name is substituted everywhere.
+    let renamed = stdout(&run(&["instructions", "--command", "/opt/bin/ie"]));
+    assert!(renamed.contains("/opt/bin/ie info FILE"));
+    assert!(!renamed.contains("`intact`"));
+
+    // Heading level is respected, for pasting under an existing section.
+    assert!(stdout(&run(&["instructions", "--heading-level", "3"])).starts_with("### "));
+    assert_eq!(code(&run(&["instructions", "--heading-level", "9"])), 2);
+
+    // The narrower wording still mandates the tool, just for fewer files.
+    let legacy = stdout(&run(&["instructions", "--legacy-only"]));
+    assert!(legacy.contains("must be made with"));
+}
+
+#[test]
+fn instructions_can_target_an_agent_calling_into_wsl() {
+    let plain = stdout(&run(&["instructions"]));
+    assert!(!plain.contains("wsl"));
+
+    let wsl = stdout(&run(&["instructions", "--wsl"]));
+    assert!(wsl.contains("### Every command starts with `wsl.exe`"));
+    assert!(wsl.contains("wsl.exe intact info FILE"));
+    assert!(wsl.contains("wslpath"));
+    // The rule is stated once; the command list stays unprefixed and readable.
+    assert!(wsl.contains("\nintact info FILE  "));
+
+    // A named distribution is pinned everywhere the launcher appears.
+    let distro = stdout(&run(&["instructions", "--wsl", "Ubuntu-24.04"]));
+    assert!(distro.contains("wsl.exe -d Ubuntu-24.04 intact info FILE"));
+    assert!(!distro.contains("`wsl.exe intact"));
+
+    let brief = stdout(&run(&["instructions", "--brief", "--wsl"]));
+    assert!(brief.contains("prefix every command below with `wsl.exe`"));
+    assert!(!stdout(&run(&["instructions", "--brief"])).contains("wsl"));
+}
+
+#[test]
+fn json_error_output_is_parseable() {
+    let sb = Sandbox::new("jsonerr");
+    let f = sb.file("a.txt", b"x\nx\n");
+    let out = run(&[
+        "--json",
+        "replace",
+        f.to_str().unwrap(),
+        "--find",
+        "x",
+        "--with",
+        "y",
+    ]);
+    assert_eq!(code(&out), 4);
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stderr)).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["kind"], "ambiguous");
+}
