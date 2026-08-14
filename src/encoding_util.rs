@@ -280,9 +280,10 @@ pub fn build_encoded_map(enc: &'static Encoding, text: &str) -> Option<EncodedMa
 
 /// Guess the encoding of bytes that are not valid UTF-8 and carry no BOM.
 pub fn detect_legacy(bytes: &[u8]) -> &'static Encoding {
-    let mut detector = chardetng::EncodingDetector::new();
+    let mut detector =
+        chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
     detector.feed(bytes, true);
-    detector.guess(None, true)
+    detector.guess(None, chardetng::Utf8Detection::Allow)
 }
 
 /// Labels advertised by `intact encodings`.

@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-TODO.
+### Changed
+
+- `similar` 2.7 to 3.1, and `chardetng` 0.1.17 to 1.0.
+- The minimum supported Rust version is 1.85, raised from 1.74 by `similar` 3,
+  which is a Rust 2024 edition crate.
 
 ## [0.2.0] - 2026-08-14
 
@@ -120,5 +124,6 @@ can make a whole changeset.
 
 Initial release.
 
-[Unreleased]: https://github.com/jonasdeyson/intact/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jonasdeyson/intact/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jonasdeyson/intact/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jonasdeyson/intact/releases/tag/v0.1.0
