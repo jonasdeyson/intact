@@ -42,13 +42,18 @@ intact help COMMAND        # the same
 intact guide               # the complete manual
 intact guide --list        # its topics
 intact guide recipes       # one topic
-intact encodings           # supported encoding labels
+intact guide encoding      # detection, labels, and the full label list
 ```
 
 `intact guide` covers the safety model, encodings and detection, line-range
 syntax, text input and escapes, exit codes, JSON output, batch scripts, and
 worked recipes. `--json` works on `guide` too, so the manual can be pulled in
 structured form.
+
+Everything is configured by flags. `intact` reads no environment variables and
+no configuration file — an agent typically runs each command in a fresh shell,
+so an `export` from one invocation would not survive to the next, and a setting
+that applies only sometimes is worse than one that never applies.
 
 ### Telling another project's agent about it
 
@@ -132,7 +137,6 @@ With `--json`, failures print a parseable object on **stderr**:
 intact info FILE                    # encoding, BOM, line endings, edit safety
 intact view FILE [--lines 40:80] [--number]
 intact search FILE --find TEXT [--regex] [--ignore-case] [--lines RANGE] [--max N]
-intact encodings                    # supported encoding labels
 intact guide [TOPIC]                # the built-in manual
 intact instructions                 # a CLAUDE.md section for another project
 ```
@@ -156,8 +160,13 @@ intact replace-lines FILE --lines 5:7 --text TEXT
 intact write   FILE --text TEXT                 # replace whole contents
 intact create  FILE --text TEXT                 # fails if the file exists
 intact convert FILE --to utf-8
-intact batch   FILE --script ops.json
+intact batch   FILE --script ops.json           # several edits, or several files
 ```
+
+**When a file needs more than one edit, reach for `batch`** rather than a run of
+separate commands: one JSON script, applied in order, written once, and nothing
+written at all if any operation fails. It is also the only command that can edit
+more than one file.
 
 #### `replace` in detail
 
@@ -194,7 +203,8 @@ Everything is 1-based and inclusive. `--lines` accepts:
 | `$` or `end` | the last line |
 | `3:$` | line 3 to the last line |
 | `-3:-1` | the last three lines |
-| `5..9` | same as `5:9` |
+
+`:` is the only separator.
 
 `insert --line N` accepts one past the last line, meaning "start a new line at
 the end".
@@ -206,15 +216,17 @@ Every command that takes text accepts one of:
 | Flag | Source |
 |---|---|
 | `--text`, `-t` | the argument itself |
-| `--text-file PATH` | a UTF-8 file |
-| `--text-stdin` | standard input |
+| `--text-file PATH` | a UTF-8 file; `-` means standard input |
 
 (`replace` uses `--find` / `--find-file` and `--with` / `--with-file` /
-`--with-stdin` / `--delete`.)
+`--delete`.)
+
+Every path argument that reads text takes `-` for standard input, `batch
+--script -` included; there is no separate `--text-stdin` flag.
 
 Input text is **always UTF-8**. With `--escapes`, backslash sequences are
-interpreted in `--text` and `--find`, which is the easy way to pass multi-line
-content in a single argument:
+interpreted in `--text`, `--find` and `--with`, which is the easy way to pass
+multi-line content in a single argument:
 
 ```console
 intact insert main.rs --line 1 --escapes --text 'use std::fmt;\nuse std::io;'
@@ -222,11 +234,11 @@ intact insert main.rs --line 1 --escapes --text 'use std::fmt;\nuse std::io;'
 
 Supported escapes: `\n \r \t \0 \\ \' \" \xNN \uXXXX \u{XXXXX}`.
 
-#### `batch` — several edits, one atomic write
+#### `batch` — several edits, and the only multi-file mode
 
-Operations are applied in order; if any of them fails, **nothing is written**.
-Later operations see the results of earlier ones, so line numbers refer to the
-state at that step.
+Operations are applied in order; if any of them fails, **nothing is written** —
+not for that file, and not for any other. Later operations see the results of
+earlier ones, so line numbers refer to the state at that step.
 
 ```json
 {
@@ -246,12 +258,40 @@ A bare JSON array works too. Recognised ops: `replace` (`find`, `with`,
 `replace-lines` (`lines`, `text`), `write` (`text`). Use `--script -` to read
 the script from stdin.
 
+Every op also takes a `file`, which is how one command edits several files. The
+`FILE` argument is the default for ops that omit it, and can be left out
+entirely when they all name one:
+
+```console
+$ intact batch --script - <<'EOF'
+[{"op":"replace","file":"src/a.py","find":"old","with":"new","all":true},
+ {"op":"replace","file":"legacy.txt","find":"old","with":"new","all":true},
+ {"op":"append","file":"CHANGELOG.md","text":"- renamed old to new"}]
+EOF
+src/a.py: updated (UTF-8, lf) - applied 1 operation(s)
+legacy.txt: updated (windows-1252, crlf) - applied 1 operation(s)
+CHANGELOG.md: updated (UTF-8, lf) - applied 1 operation(s)
+```
+
+Each file is decoded, checked and written back in its own encoding, which is
+why every other command takes exactly one file. Reporting is one summary line
+per file; under `--json`, a `files` array with one object per file — always an
+array, whether the script touched one file or twenty.
+
+Every operation runs against an in-memory copy and nothing reaches disk until
+all of them have succeeded. The writes are then one atomic rename per file;
+`intact` cannot make a rename across several files atomic, so an I/O error
+partway through that last step can leave earlier files written. A failing
+*operation* never writes anything.
+
 ### Global options
 
 | Option | Effect |
 |---|---|
 | `--json` | machine-readable result on stdout (errors on stderr) |
-| `--dry-run`, `-n` | show a diff of what would change; write nothing |
+| `--dry-run`, `-n` | print a unified diff of what would change; write nothing |
+| `--show-diff` | print a unified diff of the change *and* apply it |
+| `--diff-context N` | unchanged lines shown either side of a change (default 3) |
 | `--backup` | copy the original to `FILE.bak` first |
 | `--encoding LABEL`, `-e` | force the file's encoding instead of detecting it |
 | `--no-guess` | refuse to *write* to a file whose encoding was only guessed |
@@ -262,13 +302,102 @@ the script from stdin.
 | `--force` | edit a file that contains NUL bytes |
 | `--quiet`, `-q` | suppress the summary line |
 
+## Seeing the change
+
+An agent's permission prompt shows the command line it is about to run. For a
+built-in edit tool the harness can render a diff from the tool's arguments, but
+a shell command is one opaque string — and by the time `intact` prints anything,
+the edit is already approved. `--show-diff` closes that gap from the other side:
+it applies the edit *and* prints a unified diff of what it changed.
+
+```console
+$ intact --show-diff replace app.py --find 'timeout = 30' --with 'timeout = 60'
+--- app.py
++++ app.py
+@@ -10,7 +10,7 @@
+ def connect(host):
+     sock = socket.create_connection((host, 443))
+-    timeout = 30
++    timeout = 60
+     sock.settimeout(timeout)
+app.py: updated (UTF-8, lf) - replaced 1 of 1 occurrence(s)
+```
+
+Prefer that over `--dry-run` followed by the real command. Two invocations are
+two approvals for one change, and the file can differ between them; one
+invocation that reports exactly what it changed cannot drift. `--dry-run` is for
+deciding *whether* to make the edit — it prints the same diff and writes
+nothing.
+
+For a project where every edit should show its work, `intact instructions`
+generates a rule telling the other project's agent to pass `--show-diff` on
+every edit.
+
+The output is a real unified diff. `--quiet` suppresses only the summary line,
+so stdout is the patch and nothing else:
+
+```console
+$ intact --dry-run --quiet replace app.py --find x --with y > change.patch
+$ git apply -p0 --check change.patch
+```
+
+Line terminators are deliberately not compared line by line — a file converted
+from LF to CRLF would otherwise report every line as changed. They are reported
+above the diff instead, whenever the styles in use change:
+
+```console
+$ intact --dry-run --eol crlf append app.c --text '/* done */'
+# line endings: lf=42 crlf=0 cr=0 -> lf=42 crlf=1 cr=0
+--- app.c
++++ app.c
+@@ -40,3 +40,4 @@
+...
+```
+
+That line is how a CRLF line landing in an LF file becomes visible. A change
+with no textual difference at all — re-encoding a file, adding a BOM — says so
+rather than printing nothing.
+
+### Pre-approving previews
+
+Global flags are accepted before or after the subcommand, but write them
+before it:
+
+```console
+intact --dry-run replace app.py --find x --with y      # do this
+intact replace app.py --find x --with y --dry-run      # not this
+```
+
+Only the first form can be matched by a tool that allows commands by prefix.
+Under an agent harness that asks permission per command, a rule matching
+`intact --dry-run ` pre-approves every preview while leaving real writes to
+prompt — which only works if the flag is where a prefix can see it. In Claude
+Code that is a `Bash(intact --dry-run:*)` entry in `.claude/settings.json`.
+
+### Reading the change from JSON
+
+`--json` reports the spans that were replaced, which is what `intact` actually
+did rather than what comparing two versions of the file suggests it did:
+
+```json
+"edit_count": 1,
+"edits": [{"line": 12, "column": 5, "end_line": 12, "end_column": 17,
+           "offset": 243, "end_offset": 255,
+           "before": "timeout = 30", "after": "timeout = 60",
+           "truncated": false}]
+```
+
+With `--dry-run` or `--show-diff` a `"diff"` field carries the complete unified
+diff — never truncated, unlike the human output — plus `"eol_before"` and
+`"eol_after"` when the line-ending styles change.
+
 ## Encodings
 
 Labels follow the [WHATWG Encoding Standard](https://encoding.spec.whatwg.org/):
 `utf-8`, `utf-16le`, `utf-16be`, `windows-1250`…`windows-1258`, `iso-8859-2`…`-16`,
 `koi8-r`, `koi8-u`, `macintosh`, `ibm866`, `gbk`, `gb18030`, `big5`, `euc-jp`,
-`shift_jis`, `iso-2022-jp`, `euc-kr` and their usual aliases. Run
-`intact encodings` for the list.
+`shift_jis`, `iso-2022-jp`, `euc-kr` and their usual aliases. `intact guide
+encoding` ends with the complete list this build accepts.
 
 Two things worth knowing:
 
@@ -305,39 +434,36 @@ UTF-8 first, or choose a substitution policy.
 ### Projects that mandate one encoding
 
 If every file in a project must be Latin-1 (or Shift_JIS, or anything else),
-don't rely on detection, and don't rely on remembering `--encoding` either:
+don't rely on detection. Say so on every command that writes:
 
-```bash
-export INTACT_ENCODING=latin1   # every invocation, including `create`
-export INTACT_NO_GUESS=1        # refuse to write if it ever falls back to guessing
+```console
+$ intact --encoding latin1 --no-guess replace notes.txt --find mundo --with mundão
 ```
 
-The same applies to line endings, which have the identical trap: `--eol auto`
-follows each file rather than the policy, and a brand-new file always gets LF.
+`--encoding` applies to `create` too, which otherwise makes UTF-8 files;
+`--no-guess` turns a fall-back to statistical detection into exit 5 rather than
+a silent wrong guess.
 
-```bash
-export INTACT_EOL=crlf          # inserted text and new files
-export INTACT_STRICT_EOL=1      # refuse to touch a file that isn't already CRLF
+Line endings have the identical trap: `--eol auto` follows each file rather than
+the policy, and a brand-new file always gets LF.
+
+```console
+$ intact --eol crlf --strict-eol append app.c --text '/* done */'
 ```
 
-| Variable | Effect |
-|---|---|
-| `INTACT_ENCODING` | encoding for every invocation, as if `--encoding` were passed |
-| `INTACT_NO_GUESS` | same as `--no-guess` |
-| `INTACT_EOL` | line endings for every invocation, as if `--eol` were passed |
-| `INTACT_STRICT_EOL` | same as `--strict-eol` |
-
-The corresponding flag always overrides the variable. With these set, `create`
-makes Latin-1 CRLF files rather than UTF-8 LF ones, detection never runs, and
-`intact info` reports `detected_by: environment`. A bad value in a variable is
-an error naming the variable, on every command, not a silent fallback.
+There is deliberately **no environment variable and no config file** for any of
+this. `intact` is typically driven one command per shell — that is how an agent
+runs it — so an `export` in one invocation is gone by the next, and a mandate
+that holds only sometimes is worse than one that never holds. Put the flags in
+the command. `intact instructions --encoding latin1 --eol crlf` generates a
+CLAUDE.md section that tells the other project's agent to do exactly that.
 
 `--no-guess` and `--strict-eol` gate *writes* only — `info`, `view` and `search`
 keep working, so a file that trips a guard can still be inspected. `--strict-eol`
 turns what would have been a silently mixed-ending file into exit 5:
 
 ```console
-$ intact append app.c --text '/* done */'
+$ intact --eol crlf --strict-eol append app.c --text '/* done */'
 intact: refusing to write: app.c has 2 line ending(s) that are not CRLF (lf=2, crlf=0, cr=0)
 hint: normalise it first: `intact convert app.c --newlines crlf`
 ```
@@ -345,9 +471,6 @@ hint: normalise it first: `intact convert app.c --newlines crlf`
 `write`, `create` and `convert` are exempt, since they replace the whole content
 regardless. `convert --newlines` accepts no `--to`, so line endings can be fixed
 without restating the encoding.
-
-`intact instructions --encoding latin1 --eol crlf` generates a CLAUDE.md
-section stating both policies and how to hold to them.
 
 ### A note on guessed encodings
 
@@ -377,7 +500,7 @@ passing `--encoding` removes the guesswork entirely.
 ## Development
 
 ```console
-cargo test        # 13 unit + 33 end-to-end tests
+cargo test        # 31 unit + 67 end-to-end tests
 cargo clippy --all-targets
 ```
 
