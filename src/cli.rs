@@ -29,6 +29,9 @@ ENVIRONMENT:
   INTACT_STRICT_EOL Set to 1 to refuse writing to any file whose existing line
                       endings differ from the mandated ones (same as
                       --strict-eol). Requires --eol lf|crlf|cr.
+  INTACT_SHOW_DIFF  Set to 1 to print a unified diff of every edit as it is
+                      applied (same as --show-diff), so that a change is
+                      visible without a separate preview command.
 
 EXIT CODES:
   0  success
@@ -86,9 +89,17 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Show what would change without writing anything
+    /// Print a unified diff of what would change, and write nothing
     #[arg(long, short = 'n', global = true)]
     pub dry_run: bool,
+
+    /// Print a unified diff of the change as well as applying it
+    #[arg(long, global = true)]
+    pub show_diff: bool,
+
+    /// Unchanged lines to show either side of a change in a diff
+    #[arg(long, global = true, value_name = "N", default_value_t = crate::diff::DEFAULT_CONTEXT)]
+    pub diff_context: usize,
 
     /// Copy the original file to FILE.bak before writing
     #[arg(long, global = true)]

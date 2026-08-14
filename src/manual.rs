@@ -125,10 +125,51 @@ WHEN A COMMAND REFUSES
 
     Pass --force if you really mean it. Exit code 5.
 
-DRY RUNS
+SHOWING THE CHANGE
 
---dry-run prints a diff of what would change and writes nothing. It is the
-cheapest way to confirm an edit does what you intended before committing to it.",
+Two flags print a unified diff of an edit. --dry-run prints it and writes
+nothing; --show-diff prints it and applies the edit anyway.
+
+  intact --dry-run replace app.py --find x --with y --all   # preview only
+  intact --show-diff replace app.py --find x --with y --all # apply, and show
+
+Prefer --show-diff when the point is for someone to see what happened. A
+preview followed by the real command is two invocations of two different
+commands, and the file can differ between them; one invocation that reports
+exactly what it changed cannot drift. --dry-run is for deciding whether to
+make the edit at all.
+
+Set INTACT_SHOW_DIFF=1 to get the diff on every edit without repeating the
+flag. --diff-context N (default 3) sets how many unchanged lines are shown
+either side of a change.
+
+Global flags are accepted before or after the subcommand, but write them
+before it:
+
+  intact --dry-run replace app.py --find x --with y      # do this
+  intact replace app.py --find x --with y --dry-run      # not this
+
+Only the first form can be matched by a tool that allows commands by prefix.
+Under an agent harness that asks permission per command, a rule matching
+`intact --dry-run ` pre-approves every preview while leaving real writes to
+prompt — which only works if the flag is where a prefix can see it.
+
+The output is a real unified diff, so it can be piped anywhere that reads
+one. With --quiet, which suppresses only the summary line, stdout is the
+patch and nothing else:
+
+  intact --dry-run --quiet replace app.py --find x --with y > change.patch
+  git apply -p0 --check change.patch
+
+Line terminators are deliberately not compared line by line — converting a
+file from LF to CRLF would otherwise report every line as changed. They are
+reported above the diff instead, whenever the styles in use change:
+
+  # line endings: lf=3 crlf=0 cr=0 -> lf=3 crlf=1 cr=0
+
+That line is how appending CRLF text to an LF file becomes visible. A change
+with no textual difference at all — re-encoding a file, adding a BOM — says
+so rather than printing nothing.",
     },
     Section {
         key: "encoding",
@@ -362,8 +403,23 @@ SUCCESS (edits)
    \"occurrences_found\":1,\"occurrences_replaced\":1,\"first_line\":1,
    \"first_column\":4}
 
-Command-specific fields are merged into the same object. --dry-run adds a
-\"diff\" field instead of writing.
+Command-specific fields are merged into the same object.
+
+Every edit result carries \"edits\": the spans that were replaced, each with
+\"line\", \"column\", \"end_line\", \"end_column\", \"offset\", \"end_offset\",
+\"before\" and \"after\". That is what intact actually did, rather than what
+comparing two versions of the file suggests it did, and it is the field to
+read when a caller needs to know where an edit landed. Long text is cut to
+400 characters with \"truncated\":true; at most 200 edits are listed, and
+\"edit_count\" is always the real total.
+
+  \"edit_count\":1,\"edits\":[{\"line\":2,\"column\":1,\"end_line\":2,
+   \"end_column\":5,\"offset\":6,\"end_offset\":10,\"before\":\"beta\",
+   \"after\":\"BETA\",\"truncated\":false}]
+
+--dry-run and --show-diff add a \"diff\" field holding the complete unified
+diff — never truncated, unlike the human output — plus \"eol_before\" and
+\"eol_after\" when the line-ending styles change.
 
 A \"resolved_path\" field appears (in edit and info results alike) only when
 the path given is a symlink, and holds the file actually read and written.
@@ -507,10 +563,18 @@ REGEX WITH CAPTURE GROUPS
 $1 and ${name} expand in the replacement; --no-expand disables that. Rust regex
 syntax; there are no backreferences or lookaround.
 
+SHOW WHAT THE EDIT DID
+
+  intact --show-diff replace app.py --find x --with y --all
+
 PREVIEW, THEN APPLY
 
   intact --dry-run replace app.py --find x --with y --all
   intact replace app.py --find x --with y --all
+
+SAVE THE CHANGE AS A PATCH
+
+  intact --dry-run --quiet replace app.py --find x --with y > change.patch
 
 EDIT A LEGACY-ENCODED FILE WITH A KNOWN ENCODING
 
@@ -733,8 +797,12 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
              ```\n\n\
              Anchor each `replace` on text that occurs exactly once. A non-zero exit means \
              nothing was written: 3 no match, 4 ambiguous anchor, 5 encoding problem, 6 bad line \
-             range. Never pass `--lossy` or `--force` unless the user asks for it. Run \
-             `{cmd} guide` for the full manual and `{cmd} COMMAND --help` for one command.\n"
+             range. Never pass `--lossy` or `--force` unless the user asks for it.\n\n\
+             Add `--show-diff` to every edit — it applies the edit and prints a unified diff of \
+             what changed, which is the only way the change is visible to whoever reads your \
+             output. Use `--dry-run` in its place to preview without writing. Put global flags \
+             before the subcommand: `{cmd} --show-diff replace FILE ...`.\n\n\
+             Run `{cmd} guide` for the full manual and `{cmd} COMMAND --help` for one command.\n"
         );
     }
 
@@ -793,8 +861,17 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
          character you are inserting — run `{cmd} convert FILE --to utf-8` first if converting \
          the file is acceptable — or detection guessed the encoding wrong, in which case run \
          `{cmd} info FILE` and pass the right `--encoding LABEL`.\n\
-         - **Preview with `--dry-run`** when an edit is large or you are unsure of its extent. \
-         It prints a diff and writes nothing.\n\
+         - **Show the change.** Add `--show-diff` to every edit: it applies the edit and prints \
+         a unified diff of what it changed, so the person reading your output can see the change \
+         without taking your word for it. A permission prompt for a `{cmd}` command shows the \
+         command line, not a diff, and by the time `{cmd}` prints anything the edit is already \
+         approved — `--show-diff` is what closes that gap. Use `--dry-run` instead when you are \
+         deciding *whether* to make the edit: it prints the same diff and writes nothing. Prefer \
+         one `--show-diff` over a `--dry-run` followed by the real command, which is two \
+         approvals for one change and can drift between them.\n\
+         - **Global flags go before the subcommand**, as in `{cmd} --dry-run replace FILE ...`, \
+         not after it. Both orders work, but only the first can be matched by a prefix rule, \
+         which is how a preview gets pre-approved while a real write still prompts.\n\
          - **Do not \"fix\" mojibake by hand.** Characters like `Ã©` or `â€™` in a file mean an \
          earlier write used the wrong encoding. Report it rather than editing the damaged text \
          into a different shape.\n"

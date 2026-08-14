@@ -251,7 +251,9 @@ the script from stdin.
 | Option | Effect |
 |---|---|
 | `--json` | machine-readable result on stdout (errors on stderr) |
-| `--dry-run`, `-n` | show a diff of what would change; write nothing |
+| `--dry-run`, `-n` | print a unified diff of what would change; write nothing |
+| `--show-diff` | print a unified diff of the change *and* apply it |
+| `--diff-context N` | unchanged lines shown either side of a change (default 3) |
 | `--backup` | copy the original to `FILE.bak` first |
 | `--encoding LABEL`, `-e` | force the file's encoding instead of detecting it |
 | `--no-guess` | refuse to *write* to a file whose encoding was only guessed |
@@ -261,6 +263,95 @@ the script from stdin.
 | `--lossy` | permit rewriting a file that does not round-trip |
 | `--force` | edit a file that contains NUL bytes |
 | `--quiet`, `-q` | suppress the summary line |
+
+## Seeing the change
+
+An agent's permission prompt shows the command line it is about to run. For a
+built-in edit tool the harness can render a diff from the tool's arguments, but
+a shell command is one opaque string — and by the time `intact` prints anything,
+the edit is already approved. `--show-diff` closes that gap from the other side:
+it applies the edit *and* prints a unified diff of what it changed.
+
+```console
+$ intact --show-diff replace app.py --find 'timeout = 30' --with 'timeout = 60'
+--- app.py
++++ app.py
+@@ -10,7 +10,7 @@
+ def connect(host):
+     sock = socket.create_connection((host, 443))
+-    timeout = 30
++    timeout = 60
+     sock.settimeout(timeout)
+app.py: updated (UTF-8, lf) - replaced 1 of 1 occurrence(s)
+```
+
+Prefer that over `--dry-run` followed by the real command. Two invocations are
+two approvals for one change, and the file can differ between them; one
+invocation that reports exactly what it changed cannot drift. `--dry-run` is for
+deciding *whether* to make the edit — it prints the same diff and writes
+nothing.
+
+For a project where every edit should show its work, set `INTACT_SHOW_DIFF=1`
+rather than relying on the flag being passed each time. `intact instructions`
+generates a rule telling the other project's agent to pass it.
+
+The output is a real unified diff. `--quiet` suppresses only the summary line,
+so stdout is the patch and nothing else:
+
+```console
+$ intact --dry-run --quiet replace app.py --find x --with y > change.patch
+$ git apply -p0 --check change.patch
+```
+
+Line terminators are deliberately not compared line by line — a file converted
+from LF to CRLF would otherwise report every line as changed. They are reported
+above the diff instead, whenever the styles in use change:
+
+```console
+$ intact --dry-run --eol crlf append app.c --text '/* done */'
+# line endings: lf=42 crlf=0 cr=0 -> lf=42 crlf=1 cr=0
+--- app.c
++++ app.c
+@@ -40,3 +40,4 @@
+...
+```
+
+That line is how a CRLF line landing in an LF file becomes visible. A change
+with no textual difference at all — re-encoding a file, adding a BOM — says so
+rather than printing nothing.
+
+### Pre-approving previews
+
+Global flags are accepted before or after the subcommand, but write them
+before it:
+
+```console
+intact --dry-run replace app.py --find x --with y      # do this
+intact replace app.py --find x --with y --dry-run      # not this
+```
+
+Only the first form can be matched by a tool that allows commands by prefix.
+Under an agent harness that asks permission per command, a rule matching
+`intact --dry-run ` pre-approves every preview while leaving real writes to
+prompt — which only works if the flag is where a prefix can see it. In Claude
+Code that is a `Bash(intact --dry-run:*)` entry in `.claude/settings.json`.
+
+### Reading the change from JSON
+
+`--json` reports the spans that were replaced, which is what `intact` actually
+did rather than what comparing two versions of the file suggests it did:
+
+```json
+"edit_count": 1,
+"edits": [{"line": 12, "column": 5, "end_line": 12, "end_column": 17,
+           "offset": 243, "end_offset": 255,
+           "before": "timeout = 30", "after": "timeout = 60",
+           "truncated": false}]
+```
+
+With `--dry-run` or `--show-diff` a `"diff"` field carries the complete unified
+diff — never truncated, unlike the human output — plus `"eol_before"` and
+`"eol_after"` when the line-ending styles change.
 
 ## Encodings
 
@@ -326,6 +417,7 @@ export INTACT_STRICT_EOL=1      # refuse to touch a file that isn't already CRLF
 | `INTACT_NO_GUESS` | same as `--no-guess` |
 | `INTACT_EOL` | line endings for every invocation, as if `--eol` were passed |
 | `INTACT_STRICT_EOL` | same as `--strict-eol` |
+| `INTACT_SHOW_DIFF` | same as `--show-diff` |
 
 The corresponding flag always overrides the variable. With these set, `create`
 makes Latin-1 CRLF files rather than UTF-8 LF ones, detection never runs, and

@@ -350,6 +350,309 @@ fn dry_run_writes_nothing() {
     assert!(stdout(&out).contains("+1"));
 }
 
+/// A file with two changes far apart used to render as one block spanning
+/// everything between them, with the second change truncated out of sight.
+#[test]
+fn distant_changes_stay_separate_and_visible() {
+    let sb = Sandbox::new("hunks");
+    let body: String = (1..=200)
+        .map(|i| {
+            if i == 5 || i == 195 {
+                format!("line {i} TARGET\n")
+            } else {
+                format!("line {i} filler\n")
+            }
+        })
+        .collect();
+    let f = sb.file("big.txt", body.as_bytes());
+
+    let out = run(&[
+        "--dry-run",
+        "replace",
+        f.to_str().unwrap(),
+        "--find",
+        "TARGET",
+        "--with",
+        "CHANGED",
+        "--all",
+    ]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert_eq!(
+        text.lines().filter(|l| l.starts_with("@@")).count(),
+        2,
+        "one hunk per change: {text}"
+    );
+    assert!(text.contains("-line 5 TARGET"), "{text}");
+    assert!(
+        text.contains("-line 195 TARGET"),
+        "the second change must not be truncated away: {text}"
+    );
+    assert!(
+        text.lines().count() < 30,
+        "196 unchanged lines must not be printed: {text}"
+    );
+}
+
+#[test]
+fn a_preview_is_an_applicable_patch() {
+    let sb = Sandbox::new("patch");
+    let f = sb.file("a.txt", b"alpha\nbeta\ngamma\n");
+    let out = run(&[
+        "--dry-run",
+        "--quiet",
+        "replace",
+        f.to_str().unwrap(),
+        "--find",
+        "beta",
+        "--with",
+        "BETA",
+    ]);
+    assert_eq!(code(&out), 0);
+    let path = f.to_str().unwrap();
+    // --quiet drops the summary line, leaving the patch and nothing else.
+    assert_eq!(
+        stdout(&out),
+        format!("--- {path}\n+++ {path}\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n")
+    );
+}
+
+#[test]
+fn show_diff_prints_the_change_and_applies_it() {
+    let sb = Sandbox::new("showdiff");
+    let f = sb.file("a.txt", b"alpha\nbeta\n");
+    let out = run(&[
+        "--show-diff",
+        "replace",
+        f.to_str().unwrap(),
+        "--find",
+        "beta",
+        "--with",
+        "BETA",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), b"alpha\nBETA\n".to_vec(), "the edit was applied");
+    let text = stdout(&out);
+    assert!(text.contains("-beta\n+BETA\n"), "{text}");
+    assert!(text.contains("updated"), "{text}");
+}
+
+#[test]
+fn env_show_diff_covers_every_edit() {
+    let sb = Sandbox::new("envdiff");
+    let f = sb.file("a.txt", b"one\ntwo\n");
+    let out = run_env(
+        &[("INTACT_SHOW_DIFF", "1")],
+        &[
+            "replace",
+            f.to_str().unwrap(),
+            "--find",
+            "two",
+            "--with",
+            "2",
+        ],
+    );
+    assert_eq!(code(&out), 0);
+    assert_eq!(read(&f), b"one\n2\n".to_vec());
+    assert!(stdout(&out).contains("-two\n+2\n"), "{}", stdout(&out));
+}
+
+#[test]
+fn diff_context_is_adjustable() {
+    let sb = Sandbox::new("context");
+    let f = sb.file("a.txt", b"1\n2\n3\n4\n5\n6\n7\n8\n9\n");
+    let p = f.to_str().unwrap();
+    let preview = |context: &str| {
+        let out = run(&[
+            "--dry-run",
+            "--diff-context",
+            context,
+            "replace",
+            p,
+            "--find",
+            "5",
+            "--with",
+            "FIVE",
+        ]);
+        assert_eq!(code(&out), 0);
+        stdout(&out)
+    };
+
+    let text = preview("0");
+    assert!(text.contains("@@ -5,1 +5,1 @@"), "{text}");
+    let text = preview("2");
+    assert!(text.contains("@@ -3,5 +3,5 @@"), "{text}");
+}
+
+/// Converting line endings changes every terminator and no line content. The
+/// preview must still say something rather than claim a change and show none.
+#[test]
+fn line_ending_changes_are_visible_in_a_preview() {
+    let sb = Sandbox::new("eoldiff");
+    let f = sb.file("a.txt", b"alpha\nbeta\ngamma\n");
+    let out = run(&[
+        "--dry-run",
+        "convert",
+        f.to_str().unwrap(),
+        "--newlines",
+        "crlf",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(
+        text.contains("# line endings: lf=3 crlf=0 cr=0 -> lf=0 crlf=3 cr=0"),
+        "{text}"
+    );
+    assert_eq!(read(&f), b"alpha\nbeta\ngamma\n".to_vec(), "wrote nothing");
+}
+
+#[test]
+fn a_stray_crlf_in_an_lf_file_shows_up() {
+    let sb = Sandbox::new("straycrlf");
+    let f = sb.file("a.c", b"int main(void)\n{\n}\n");
+    let out = run(&[
+        "--dry-run",
+        "--eol",
+        "crlf",
+        "append",
+        f.to_str().unwrap(),
+        "--text",
+        "/* done */",
+    ]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(
+        text.contains("# line endings: lf=3 crlf=0 cr=0 -> lf=3 crlf=1 cr=0"),
+        "{text}"
+    );
+    assert!(text.contains("+/* done */"), "{text}");
+}
+
+#[test]
+fn a_change_with_no_visible_diff_explains_itself() {
+    let sb = Sandbox::new("invisible");
+    let f = sb.file("a.txt", LATIN1);
+    let out = run(&[
+        "--encoding",
+        "windows-1252",
+        "--dry-run",
+        "convert",
+        f.to_str().unwrap(),
+        "--to",
+        "utf-8",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(text.contains("would change"), "{text}");
+    assert!(text.contains("# no textual change"), "{text}");
+    assert_eq!(read(&f), LATIN1.to_vec());
+}
+
+#[test]
+fn json_reports_the_spans_that_were_edited() {
+    let sb = Sandbox::new("spans");
+    let f = sb.file("a.txt", b"alpha\nbeta beta\ngamma\n");
+    let out = run(&[
+        "--json",
+        "replace",
+        f.to_str().unwrap(),
+        "--find",
+        "beta",
+        "--with",
+        "BETA",
+        "--all",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["edit_count"], 2);
+    let edits = v["edits"].as_array().unwrap();
+    assert_eq!(edits.len(), 2);
+    assert_eq!(edits[0]["line"], 2);
+    assert_eq!(edits[0]["column"], 1);
+    assert_eq!(edits[0]["before"], "beta");
+    assert_eq!(edits[0]["after"], "BETA");
+    assert_eq!(edits[1]["column"], 6);
+    // No diff was asked for, so none is attached.
+    assert!(v.get("diff").is_none());
+}
+
+#[test]
+fn json_carries_the_whole_diff() {
+    let sb = Sandbox::new("jsondiff");
+    let f = sb.file("a.txt", b"alpha\nbeta\n");
+    let out = run(&[
+        "--json",
+        "--dry-run",
+        "replace",
+        f.to_str().unwrap(),
+        "--find",
+        "beta",
+        "--with",
+        "BETA",
+    ]);
+    assert_eq!(code(&out), 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let diff = v["diff"].as_str().unwrap();
+    assert!(diff.contains("@@ -1,2 +1,2 @@"), "{diff}");
+    assert!(diff.contains("-beta\n+BETA\n"), "{diff}");
+}
+
+#[test]
+fn batch_previews_every_operation_in_one_diff() {
+    let sb = Sandbox::new("batchdiff");
+    let f = sb.file("a.txt", b"one\ntwo\nthree\n");
+    let script = sb.file(
+        "ops.json",
+        br#"{"ops":[{"op":"replace","find":"two","with":"TWO"},{"op":"append","text":"four"}]}"#,
+    );
+    let out = run(&[
+        "--dry-run",
+        "batch",
+        f.to_str().unwrap(),
+        "--script",
+        script.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(text.contains("-two\n+TWO\n"), "{text}");
+    assert!(text.contains("+four"), "{text}");
+    assert_eq!(read(&f), b"one\ntwo\nthree\n".to_vec(), "wrote nothing");
+}
+
+#[test]
+fn a_new_file_diffs_against_dev_null() {
+    let sb = Sandbox::new("newfile");
+    let path = sb.dir.join("new.txt");
+    let out = run(&[
+        "--dry-run",
+        "create",
+        path.to_str().unwrap(),
+        "--text",
+        "hello",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(text.contains("--- /dev/null"), "{text}");
+    assert!(text.contains("@@ -0,0 +1,1 @@\n+hello"), "{text}");
+    assert!(!path.exists(), "wrote nothing");
+}
+
+#[test]
+fn losing_the_final_newline_is_shown() {
+    let sb = Sandbox::new("finalnl");
+    let f = sb.file("a.txt", b"alpha\nbeta");
+    let out = run(&[
+        "--dry-run",
+        "append",
+        f.to_str().unwrap(),
+        "--text",
+        "gamma",
+    ]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("\\ No newline at end of file"), "{text}");
+}
+
 #[test]
 fn backup_keeps_the_original() {
     let sb = Sandbox::new("backup");

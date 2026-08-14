@@ -1,6 +1,6 @@
 [package]
 name = "intact"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.74"
 description = "An encoding-preserving command-line text editor."
@@ -21,6 +21,7 @@ encoding_rs = "0.8"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+similar = "2.7.0"
 
 [profile.release]
 opt-level = 3

@@ -12,7 +12,7 @@ mod textsrc;
 use std::path::Path;
 
 use clap::Parser;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use cli::{BomMode, Cli, Command};
 use document::{Detection, Document, ForcedEncoding};
@@ -30,6 +30,8 @@ const ENV_NO_GUESS: &str = "INTACT_NO_GUESS";
 const ENV_EOL: &str = "INTACT_EOL";
 /// Set to 1/true/yes to refuse writing to a file whose line endings differ.
 const ENV_STRICT_EOL: &str = "INTACT_STRICT_EOL";
+/// Set to 1/true/yes to print a diff of every edit, as if --show-diff.
+const ENV_SHOW_DIFF: &str = "INTACT_SHOW_DIFF";
 
 fn main() {
     let cli = Cli::parse();
@@ -582,14 +584,75 @@ fn ensure_parent_dir(file: &Path, create: bool) -> Result<()> {
     .with_hint("pass --parents to create it"))
 }
 
+/// A diff is produced for `--dry-run` (where it is the whole point) and for
+/// `--show-diff`, which reports an edit that was actually applied. The latter
+/// is what puts the change in front of a human without a second command and a
+/// second approval, so it is worth a project-wide switch of its own.
+fn wants_diff(cli: &Cli) -> bool {
+    cli.dry_run || cli.show_diff || env_flag(ENV_SHOW_DIFF)
+}
+
+fn merge_details(report: &mut Report, extra: Map<String, Value>) {
+    match &mut report.details {
+        Value::Object(map) => map.extend(extra),
+        other => *other = Value::Object(extra),
+    }
+}
+
+/// Print the diff above the summary line, or attach it to the JSON result.
+/// Human output is capped; JSON is not, since it is not being read by eye.
+fn emit_diff(cli: &Cli, report: &mut Report, diff: &diff::Diff, existed: bool, changed: bool) {
+    // --quiet suppresses the summary line; a diff that was explicitly asked for
+    // is not that, and suppressing it would leave `--show-diff -q` — the way to
+    // get a patch on stdout and nothing else — with no output at all.
+
+    // "would change" with nothing shown is the one outcome a preview must never
+    // produce, so an invisible change is spelled out rather than left blank.
+    if diff.is_empty() {
+        if changed && !cli.json {
+            println!("# no textual change; the bytes differ (encoding or byte-order mark)");
+        }
+        return;
+    }
+
+    let new_label = report.path.clone();
+    let old_label = if existed {
+        new_label.clone()
+    } else {
+        "/dev/null".to_string()
+    };
+
+    if cli.json {
+        let mut extra = Map::new();
+        extra.insert(
+            "diff".into(),
+            json!(diff::render(diff, &old_label, &new_label, None)),
+        );
+        if let Some(change) = &diff.eol {
+            let counts =
+                |(lf, crlf, cr): (usize, usize, usize)| json!({ "lf": lf, "crlf": crlf, "cr": cr });
+            extra.insert("eol_before".into(), counts(change.before));
+            extra.insert("eol_after".into(), counts(change.after));
+        }
+        merge_details(report, extra);
+    } else {
+        print!(
+            "{}",
+            diff::render(diff, &old_label, &new_label, Some(diff::MAX_RENDERED_ROWS))
+        );
+    }
+}
+
 fn finish(cli: &Cli, doc: &Document, command: &'static str, outcome: OpOutcome) -> Result<i32> {
     let OpOutcome {
         mut edits,
         details,
         summary,
     } = outcome;
-    let new_text = doc.apply_to_text(&edits);
+    // build_output sorts the edits, which apply_to_text and the diff both rely
+    // on to walk the text in one pass.
     let bytes = doc.build_output(&mut edits, cli.unmappable, cli.lossy)?;
+    let new_text = doc.apply_to_text(&edits);
     // A brand-new file must be created even when its content is empty, so
     // "nothing to write" is not the same question as "bytes are unchanged".
     let changed = bytes != doc.raw || !doc.existed;
@@ -605,22 +668,18 @@ fn finish(cli: &Cli, doc: &Document, command: &'static str, outcome: OpOutcome) 
     // new file those differ whenever --eol was used.
     report.eol = lines::detect_eol(&new_text).0.name();
 
-    let hunk = if cli.dry_run {
-        diff::diff(&doc.text, &new_text)
-    } else {
-        None
-    };
-    if let Some(h) = &hunk {
-        let rendered = diff::render(h, 40);
-        if cli.json {
-            if let Value::Object(map) = &mut report.details {
-                map.insert("diff".into(), json!(rendered));
-            } else {
-                report.details = json!({ "diff": rendered });
-            }
-        } else if !cli.quiet {
-            print!("{rendered}");
-        }
+    // The spans are what intact actually replaced. Reporting them beats any
+    // diff of the two texts, which can only infer that after the fact.
+    if cli.json {
+        let mut extra = Map::new();
+        extra.insert("edits".into(), diff::edits_json(&doc.text, &edits));
+        extra.insert("edit_count".into(), json!(edits.len()));
+        merge_details(&mut report, extra);
+    }
+
+    if wants_diff(cli) {
+        let diff = diff::from_edits(&doc.text, &new_text, &edits, cli.diff_context);
+        emit_diff(cli, &mut report, &diff, doc.existed, changed);
     }
 
     if !cli.dry_run && changed {
@@ -710,6 +769,13 @@ fn cmd_convert(cli: &Cli, args: &cli::ConvertArgs, forced: Option<ForcedEncoding
         "bom_before": doc.bom.is_some(),
         "bom_after": bom.is_some(),
     });
+
+    // A conversion has no edit spans to work from: it rewrites terminators
+    // across the whole file, or only re-encodes it and changes no text at all.
+    if wants_diff(cli) {
+        let diff = diff::from_texts(&doc.text, &text, cli.diff_context);
+        emit_diff(cli, &mut report, &diff, doc.existed, changed);
+    }
 
     if !cli.dry_run && changed {
         doc.save(&bytes, cli.backup)?;
@@ -859,18 +925,15 @@ fn cmd_batch(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -
     report.lines_after = final_doc.lines().count();
     report.details = json!({ "operations": batch_ops.len(), "steps": summaries });
 
-    if cli.dry_run {
-        if let Some(h) = diff::diff(&original.text, &final_doc.text) {
-            let rendered = diff::render(&h, 40);
-            if cli.json {
-                if let Value::Object(map) = &mut report.details {
-                    map.insert("diff".into(), json!(rendered));
-                }
-            } else if !cli.quiet {
-                print!("{rendered}");
-            }
-        }
-    } else if changed {
+    // Each step re-edits the result of the last, so the spans of any one of
+    // them describe a document that no longer exists. Comparing the two ends is
+    // the only honest account of a batch.
+    if wants_diff(cli) {
+        let diff = diff::from_texts(&original.text, &final_doc.text, cli.diff_context);
+        emit_diff(cli, &mut report, &diff, true, changed);
+    }
+
+    if !cli.dry_run && changed {
         original.save(&current, cli.backup)?;
     }
 
