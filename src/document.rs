@@ -24,8 +24,6 @@ use crate::lines::{detect_eol, Eol, LineIndex};
 pub enum Detection {
     /// The user passed `--encoding`.
     Explicit,
-    /// Taken from the INTACT_ENCODING environment variable.
-    Environment,
     /// A byte-order mark was present.
     Bom,
     /// The bytes are valid UTF-8.
@@ -40,7 +38,6 @@ impl Detection {
     pub fn as_str(self) -> &'static str {
         match self {
             Detection::Explicit => "explicit",
-            Detection::Environment => "environment",
             Detection::Bom => "bom",
             Detection::Utf8 => "utf-8-valid",
             Detection::Guessed => "guessed",
@@ -62,13 +59,6 @@ impl ForcedEncoding {
         ForcedEncoding {
             encoding,
             source: Detection::Explicit,
-        }
-    }
-
-    pub fn environment(encoding: &'static Encoding) -> Self {
-        ForcedEncoding {
-            encoding,
-            source: Detection::Environment,
         }
     }
 }

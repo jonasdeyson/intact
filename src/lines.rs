@@ -269,6 +269,9 @@ impl LineSpec {
 }
 
 /// An inclusive 1-based line range: `5`, `5:9`, `5:`, `:9`, `3:$`, `-3:-1`.
+///
+/// `:` is the only separator. A second spelling would be one more thing to
+/// learn and one more thing to get wrong, for no expressive gain.
 #[derive(Debug, Clone, Copy)]
 pub struct LineRange {
     pub start: Option<LineSpec>,
@@ -283,8 +286,7 @@ impl FromStr for LineRange {
         if s.is_empty() {
             return Err("empty line range".to_string());
         }
-        let sep = s.find(':').or_else(|| s.find(".."));
-        match sep {
+        match s.find(':') {
             None => {
                 let spec: LineSpec = s.parse()?;
                 Ok(LineRange {
@@ -293,8 +295,7 @@ impl FromStr for LineRange {
                 })
             }
             Some(idx) => {
-                let sep_len = if s[idx..].starts_with("..") { 2 } else { 1 };
-                let (lhs, rhs) = (&s[..idx], &s[idx + sep_len..]);
+                let (lhs, rhs) = (&s[..idx], &s[idx + 1..]);
                 let start = if lhs.trim().is_empty() {
                     None
                 } else {
@@ -388,5 +389,7 @@ mod tests {
         assert_eq!(r.resolve(10).unwrap(), (5, 5));
         assert!("7:3".parse::<LineRange>().unwrap().resolve(10).is_err());
         assert!("0".parse::<LineRange>().is_err());
+        // `..` was a second spelling of `:`; it is no longer accepted.
+        assert!("5..9".parse::<LineRange>().is_err());
     }
 }

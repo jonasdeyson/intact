@@ -7,19 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Making an edit visible to the person who approved it. An agent's permission
-prompt shows a command line, not a diff, and by the time `intact` prints
-anything the edit is already approved — so the diff it prints afterwards has to
-be worth reading.
+Making an edit visible to the person who approved it, and cutting the API down
+to what an agent actually needs: one way to do each thing, and one command that
+can make a whole changeset.
 
 ### Added
 
+- `batch` operations take a `file` of their own, so one invocation can edit
+  several files. The `FILE` argument is the default for operations that omit it,
+  and may be left out when they all name one. Each file is decoded, checked and
+  written back in its own encoding, so a script spanning a UTF-8 file and a
+  windows-1252 one is fine. This is the only multi-file mode; every other
+  command still takes exactly one file.
+- Nothing is written until every operation in a script has succeeded, across
+  every file it touches — a failure on the last operation leaves the first
+  file untouched too.
+- Any path argument that reads text accepts `-` for standard input, which is
+  what `batch --script -` always did.
+- `intact guide encoding` ends with the full list of encoding labels this build
+  accepts.
 - `--show-diff` applies an edit **and** prints a unified diff of what it
   changed, so one invocation both makes and reports the change. Preferable to a
   `--dry-run` followed by the real command, which is two approvals for one
   change and can drift between them.
-- `INTACT_SHOW_DIFF=1` sets `--show-diff` for every invocation, for a project
-  where every edit should show its work.
 - `--diff-context N` sets the unchanged lines shown either side of a change
   (default 3).
 - Every `--json` edit result carries `edits` and `edit_count`: the spans that
@@ -36,8 +46,51 @@ be worth reading.
   on edits, and to write global flags before the subcommand so that a preview
   can be pre-approved by a prefix rule.
 
+### Removed
+
+- **All environment variables**: `INTACT_ENCODING`, `INTACT_NO_GUESS`,
+  `INTACT_EOL`, `INTACT_STRICT_EOL` and `INTACT_SHOW_DIFF`. `intact` is normally
+  driven one command per shell — which is how an agent runs it — so an `export`
+  in one invocation is gone by the next, and a mandate that holds only sometimes
+  is worse than one that never holds. The corresponding flags are unchanged, and
+  `intact instructions` now generates flag-based rules. `detected_by` no longer
+  reports `environment`.
+- `--text-stdin` and `--with-stdin`, in favour of `--text-file -` and
+  `--with-file -`.
+- `create --overwrite`, which was exactly `write`. `create` on an existing file
+  exits 7 and points at `write`.
+- `intact encodings`, folded into `intact guide encoding`.
+- The `5..9` line-range spelling; `:` is the only separator.
+- The visible aliases `set-lines` and `claude-md`. Both still resolve, but are
+  no longer advertised as second names for one command.
+
 ### Changed
 
+- `COMMAND --help` lists only the global options that command actually reads.
+  `intact info --help` used to advertise `--backup`, `--dry-run`, `--unmappable`
+  and eight more that `info` ignores; it now shows `--json` and `--encoding`.
+  `create` drops `--backup` (the file cannot already exist), `convert` drops
+  `--eol`/`--strict-eol` (it has `--newlines`), `delete` and `batch` drop
+  `--escapes`. Nothing about parsing changed: every global is still accepted by
+  every command, in either position, so passing `--encoding LABEL --no-guess`
+  uniformly still works.
+- An option that cannot do anything is refused (exit 2) rather than accepted
+  and ignored. `--no-expand` without `--regex` did nothing; `--max 0` reported
+  "no match" on a file full of matches; `--expect 0` could only ever exit 3 or
+  4; `--occurrence 0` names no occurrence; `convert --bom add` to an encoding
+  with no byte-order mark wrote no mark and said nothing. `batch` scripts get
+  the same treatment for the two its JSON can express.
+- `insert` states in its usage line that `--line` or `--after` is required, and
+  every command taking text that `--text` or `--text-file` is, instead of
+  opening the file and only then reporting it.
+- `replace --find-file - --with-file -` is refused: there is one standard
+  input, so the second read returned an empty string and the replacement
+  silently became a deletion.
+- `batch` reports per file: one summary line each, and under `--json` a `files`
+  array with one object per file — always an array, whether the script touched
+  one file or twenty. It replaces the previous single-file fields and `steps`.
+- `--escapes` documents that it applies to `--with` as well as `--text` and
+  `--find`, which it always did.
 - Diffs are unified diffs: `---`/`+++` headers, context lines, and one hunk per
   change. `git apply -p0` accepts the output. Previously a diff was a single
   block spanning everything between the first and last change, capped at 40

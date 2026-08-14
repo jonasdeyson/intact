@@ -131,6 +131,20 @@ pub fn replace(
     if find.is_empty() {
         return Err(AppError::new(ErrorKind::Usage, "--find must not be empty"));
     }
+    // The command line rules these out before parsing finishes; a batch script
+    // reaches this function without passing through clap at all.
+    if args.no_expand && !args.regex {
+        return Err(AppError::new(
+            ErrorKind::Usage,
+            "no_expand applies to a regex replacement, and regex is not set",
+        ));
+    }
+    if args.expect == Some(0) {
+        return Err(AppError::new(
+            ErrorKind::Usage,
+            "expect 0 can never succeed: no match is exit 3, and any match is exit 4",
+        ));
+    }
     // A literal needle typed with \n should still match a CRLF file.
     let needle = if args.regex {
         find.to_string()

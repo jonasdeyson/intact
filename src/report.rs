@@ -50,6 +50,20 @@ impl Report {
         let mut obj = Map::new();
         obj.insert("ok".into(), json!(true));
         obj.insert("command".into(), json!(self.command));
+        self.write_fields(&mut obj);
+        Value::Object(obj)
+    }
+
+    /// The same fields without `ok`/`command`, for one entry of `batch`'s
+    /// `files` array, whose owning object already carries those.
+    pub fn to_file_json(&self) -> Value {
+        let mut obj = Map::new();
+        self.write_fields(&mut obj);
+        Value::Object(obj)
+    }
+
+    /// Written once so the two JSON shapes above cannot drift apart.
+    fn write_fields(&self, obj: &mut Map<String, Value>) {
         obj.insert("path".into(), json!(self.path));
         // Only present for a symlink, so its presence is itself the signal.
         if let Some(resolved) = &self.resolved_path {
@@ -71,7 +85,6 @@ impl Report {
                 obj.insert(k.clone(), v.clone());
             }
         }
-        Value::Object(obj)
     }
 
     pub fn human(&self) -> String {

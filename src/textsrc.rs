@@ -8,30 +8,18 @@ use crate::error::{AppError, ErrorKind, Result};
 
 /// Read a UTF-8 text argument. `what` names the argument in error messages.
 pub fn resolve(src: &TextSource, what: &str, escapes: bool) -> Result<String> {
-    let raw = if let Some(t) = &src.text {
-        t.clone()
-    } else if let Some(p) = &src.text_file {
-        read_utf8_file(p)?
-    } else if src.text_stdin {
-        read_stdin()?
-    } else {
-        return Err(AppError::new(
-            ErrorKind::Usage,
-            format!("{what} requires --text, --text-file or --text-stdin"),
-        ));
-    };
-    if escapes {
-        unescape(&raw)
-    } else {
-        Ok(raw)
-    }
+    resolve_pair(
+        &src.text,
+        &src.text_file,
+        &format!("{what} requires --text or --text-file"),
+        escapes,
+    )
 }
 
-/// Same, for the ad-hoc `--x` / `--x-file` / `--x-stdin` triples.
-pub fn resolve_triple(
+/// Same, for the ad-hoc `--x` / `--x-file` pairs (`--find`, `--with`).
+pub fn resolve_pair(
     inline: &Option<String>,
     file: &Option<std::path::PathBuf>,
-    stdin: bool,
     what: &str,
     escapes: bool,
 ) -> Result<String> {
@@ -39,13 +27,8 @@ pub fn resolve_triple(
         t.clone()
     } else if let Some(p) = file {
         read_utf8_file(p)?
-    } else if stdin {
-        read_stdin()?
     } else {
-        return Err(AppError::new(
-            ErrorKind::Usage,
-            format!("{what} is required"),
-        ));
+        return Err(AppError::new(ErrorKind::Usage, what.to_string()));
     };
     if escapes {
         unescape(&raw)
@@ -54,7 +37,14 @@ pub fn resolve_triple(
     }
 }
 
+/// Read a UTF-8 file, or standard input when the path is `-`.
+///
+/// One convention for "read this from stdin" across every path argument beats a
+/// parallel `--x-stdin` flag on each of them.
 pub fn read_utf8_file(path: &Path) -> Result<String> {
+    if path == Path::new("-") {
+        return read_stdin();
+    }
     let bytes = std::fs::read(path).map_err(|e| {
         AppError::new(
             if e.kind() == std::io::ErrorKind::NotFound {

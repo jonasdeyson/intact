@@ -43,7 +43,6 @@ COMMANDS
     info           encoding, BOM, line endings, line count, edit safety
     view           print a file or a line range as UTF-8
     search         find a string or regex, with line and column numbers
-    encodings      list supported encoding labels
 
   Edit:
     replace        replace occurrences of a string or regex
@@ -55,21 +54,37 @@ COMMANDS
     write          replace the entire contents, keeping the encoding
     create         create a new file, failing if it exists
     convert        re-encode the file into a different encoding
-    batch          apply several operations with one atomic write
+    batch          several operations, one write per file — and the only
+                     command that can edit more than one file
 
   Documentation:
     guide          this manual
     instructions   a section to paste into a project's CLAUDE.md / AGENTS.md
     help           per-command help (also `intact CMD --help`)
 
+REACH FOR BATCH WHEN THERE IS MORE THAN ONE EDIT
+
+A file that needs several changes wants one `intact batch` rather than a run of
+separate commands: the operations are described in a JSON script, applied in
+order, and written once. Nothing is written unless every one of them succeeds,
+so a script cannot leave a file half-edited. Operations may name a \"file\" of
+their own, which is how one command edits several files. See `intact guide
+batch`.
+
 SCOPE
 
 intact writes file contents: it creates, edits and truncates files, and
 --parents will create a missing directory for a new file. It deliberately does
 not delete, rename, move or copy files, and does not change permissions — use
-the normal tools for those. It also works on one file per invocation; there is
-no glob or multi-file mode, so that each file's encoding is decided and
-reported separately.",
+the normal tools for those.
+
+Every command but `batch` takes exactly one file, so that each file's encoding
+is decided and reported separately. There is no glob: `batch` names its files
+explicitly, and a shell loop covers the rest.
+
+Everything is configured by command-line flags. intact reads no environment
+variables and no configuration file, because a tool that is usually driven one
+command per shell cannot rely on state surviving between them.",
     },
     Section {
         key: "safety",
@@ -139,9 +154,8 @@ commands, and the file can differ between them; one invocation that reports
 exactly what it changed cannot drift. --dry-run is for deciding whether to
 make the edit at all.
 
-Set INTACT_SHOW_DIFF=1 to get the diff on every edit without repeating the
-flag. --diff-context N (default 3) sets how many unchanged lines are shown
-either side of a change.
+--diff-context N (default 3) sets how many unchanged lines are shown either
+side of a change.
 
 Global flags are accepted before or after the subcommand, but write them
 before it:
@@ -179,35 +193,36 @@ so rather than printing nothing.",
 DETECTION ORDER
 
   1. --encoding LABEL, if given, wins outright.
-  2. The INTACT_ENCODING environment variable.
-  3. A byte-order mark (UTF-8, UTF-16LE, UTF-16BE).
-  4. Bytes that are valid UTF-8 are treated as UTF-8.
-  5. Otherwise chardetng guesses a legacy encoding.
+  2. A byte-order mark (UTF-8, UTF-16LE, UTF-16BE).
+  3. Bytes that are valid UTF-8 are treated as UTF-8.
+  4. Otherwise chardetng guesses a legacy encoding.
 
 `intact info FILE` reports which of these applied, as `detected_by`:
-explicit, environment, bom, utf-8-valid, guessed, or default (empty/new file).
+explicit, bom, utf-8-valid, guessed, or default (empty/new file).
 
 PROJECTS THAT MANDATE ONE ENCODING
 
 If every file in a project must be, say, Latin-1, do not rely on detection at
-all — and do not rely on remembering --encoding on each command either:
+all. Pass both flags on every command that writes:
 
-  export INTACT_ENCODING=latin1
-  export INTACT_NO_GUESS=1
+  intact --encoding latin1 --no-guess replace FILE --find X --with Y
 
-INTACT_ENCODING applies to every invocation, including `create`, which
-otherwise makes UTF-8 files. --encoding still overrides it for the odd file that
-is genuinely different.
+--encoding applies to `create` too, which otherwise makes UTF-8 files.
 
-INTACT_NO_GUESS (or --no-guess) makes any *write* to a file whose encoding was
-merely guessed fail with exit 5 instead of proceeding. Read-only commands (info,
-view, search) still work, so a file that trips the guard can still be diagnosed.
+--no-guess makes any *write* to a file whose encoding was merely guessed fail
+with exit 5 instead of proceeding. Read-only commands (info, view, search) still
+work, so a file that trips the guard can still be diagnosed.
 
 That pairing matters more than it looks. A wrong single-byte guess does not
 merely display the file oddly: existing bytes survive, but text you insert is
 encoded in the wrong repertoire. Inserting 'ć' into a file guessed as
-windows-1250 writes byte 0xE6, which a Latin-1 reader shows as 'æ'. Pinning the
-encoding removes that whole class of failure.
+windows-1250 writes byte 0xE6, which a Latin-1 reader shows as 'æ'. Declaring
+the encoding removes that whole class of failure.
+
+There is no environment variable or config file for this, deliberately. A tool
+driven one command per shell — which is how an agent runs it — cannot rely on an
+`export` from a previous command still being set, and a mandate that applies
+only sometimes is worse than none. Put the flags in the command.
 
 `intact instructions --encoding latin1` generates a CLAUDE.md section stating
 the policy, for agents working in such a project.
@@ -222,9 +237,8 @@ rewritten. But the character repertoire differs, so inserting 'ã' into a file
 believed to be windows-1250 fails with exit 5 and a message saying the encoding
 was guessed rather than declared.
 
-When a project's encoding is known, pass --encoding — or set INTACT_ENCODING
-once and add INTACT_NO_GUESS=1 so a missed flag fails loudly instead of
-falling back to a guess.
+When a project's encoding is known, pass --encoding, and add --no-guess so a
+missed flag fails loudly instead of falling back to a guess.
 
 LABELS
 
@@ -232,7 +246,7 @@ Labels follow the WHATWG Encoding Standard: utf-8, utf-16le, utf-16be,
 windows-1250 through windows-1258, windows-874, iso-8859-2 through iso-8859-16,
 koi8-r, koi8-u, macintosh, x-mac-cyrillic, ibm866, gbk, gb18030, big5, euc-jp,
 shift_jis, iso-2022-jp, euc-kr, and their usual aliases (latin1, cp1252, ...).
-Run `intact encodings` for the list.
+The complete list this build accepts is at the end of this topic.
 
 Two things worth knowing:
 
@@ -268,7 +282,8 @@ Line numbers are 1-based. Ranges are inclusive at both ends.
   3:$      line 3 to the last line
   -1       the last line
   -3:-1    the last three lines
-  5..9     same as 5:9
+
+`:` is the only range separator.
 
 --line and --after take a single position (7, $, -2); --lines takes a range.
 
@@ -283,7 +298,7 @@ search — restrict the operation to that region and leave the rest alone.",
     Section {
         key: "text",
         title: "SUPPLYING TEXT",
-        summary: "--text, --text-file, --text-stdin, and backslash escapes",
+        summary: "--text, --text-file, and backslash escapes",
         body: "\
 Input text is always UTF-8. It is transcoded into the file's own encoding on
 write, which is the entire point of this tool.
@@ -291,20 +306,21 @@ write, which is the entire point of this tool.
 Every command that takes text accepts one of:
 
   --text TEXT, -t     the argument itself
-  --text-file PATH    a UTF-8 file
-  --text-stdin        standard input
+  --text-file PATH    a UTF-8 file; `-` means standard input
 
-replace uses a matching set for each half:
+replace uses a matching pair for each half:
 
   --find TEXT, -f     --with TEXT, -w
   --find-file PATH    --with-file PATH
-                      --with-stdin
                       --delete          remove the match instead of replacing it
+
+Any path argument that reads text accepts `-` for standard input, including
+`batch --script -`. There is no separate --text-stdin flag.
 
 ESCAPES
 
---escapes interprets backslash sequences in --text and --find. This is the
-easiest way to pass multi-line content in a single argument:
+--escapes interprets backslash sequences in --text, --find and --with. This is
+the easiest way to pass multi-line content in a single argument:
 
   intact insert main.rs --line 1 --escapes --text 'use std::fmt;\\nuse std::io;'
 
@@ -328,17 +344,16 @@ PROJECTS THAT MANDATE ONE LINE-ENDING STYLE
 
 auto is right for a repository of mixed files and wrong for one with a policy:
 it follows each file rather than the policy, and a brand-new file created with
-auto always gets LF. As with encodings, pin it instead of remembering a flag:
+auto always gets LF. As with encodings, say so on the command:
 
-  export INTACT_EOL=crlf
-  export INTACT_STRICT_EOL=1
+  intact --eol crlf --strict-eol append FILE --text TEXT
 
-INTACT_EOL applies to every invocation, including `create`. --eol still
-overrides it.
+--eol applies to `create` too, so a new file gets the mandated style rather
+than LF.
 
-INTACT_STRICT_EOL (or --strict-eol) makes any write to a file whose existing
-terminators are not the mandated ones fail with exit 5, instead of appending
-CRLF text to an LF file and leaving it mixed. It reports the counts it found:
+--strict-eol makes any write to a file whose existing terminators are not the
+mandated ones fail with exit 5, instead of appending CRLF text to an LF file and
+leaving it mixed. It reports the counts it found:
 
   refusing to write: app.c has 2 line ending(s) that are not CRLF
   (lf=2, crlf=0, cr=0)
@@ -425,6 +440,18 @@ A \"resolved_path\" field appears (in edit and info results alike) only when
 the path given is a symlink, and holds the file actually read and written.
 Its absence means the path is the file.
 
+SUCCESS (batch)
+
+batch reports per file, so its result carries a \"files\" array instead of the
+single-file fields above. The array is always present, whatever the count.
+
+  {\"ok\":true,\"command\":\"batch\",\"operations\":3,\"changed\":true,
+   \"dry_run\":false,\"files\":[
+     {\"path\":\"a.py\",\"encoding\":\"UTF-8\",\"detected_by\":\"utf-8-valid\",
+      \"bom\":false,\"eol\":\"lf\",\"changed\":true,\"dry_run\":false,
+      \"bytes_before\":120,\"bytes_after\":118,\"lines_before\":9,
+      \"lines_after\":9,\"summary\":\"applied 2 operation(s)\",\"operations\":2}]}
+
 SUCCESS (search)
 
   {\"ok\":true,\"command\":\"search\",\"count\":2,\"matches\":[
@@ -448,14 +475,16 @@ not_found, io — the same taxonomy as the exit codes.",
     Section {
         key: "batch",
         title: "BATCH SCRIPTS",
-        summary: "several edits, one atomic write, all-or-nothing",
+        summary: "several edits and several files, all-or-nothing",
         body: "\
   intact batch FILE --script ops.json
   intact batch FILE --script -        # read the script from stdin
+  intact batch --script ops.json      # every op names its own file
 
-Operations are applied in order. Later operations see the results of earlier
-ones, so line numbers refer to the state at that step. If any operation fails,
-nothing is written at all.
+Use this whenever a file needs more than one change. Operations are applied in
+order and later ones see the results of earlier ones, so line numbers refer to
+the state at that step. If any operation fails, nothing is written at all — not
+for that file and not for any other.
 
   {
     \"ops\": [
@@ -478,11 +507,47 @@ A bare JSON array works too. Fields per op:
   replace-lines  lines, text
   write          text
 
-\"lines\" and \"line\" accept a number or any range string from the ranges topic.
-Unknown fields are rejected, so a typo fails loudly instead of being ignored.
+Every op also accepts \"file\". \"lines\" and \"line\" accept a number or any range
+string from the ranges topic. Unknown fields are rejected, so a typo fails
+loudly instead of being ignored.
 
 Text in a script is UTF-8 JSON, with normal JSON escapes — use \\n for newlines
-rather than the --escapes flag.",
+rather than the --escapes flag.
+
+SEVERAL FILES IN ONE COMMAND
+
+An operation's \"file\" says which file it edits. FILE on the command line is the
+default for operations that do not name one, and may be omitted entirely when
+they all do.
+
+  {
+    \"ops\": [
+      { \"op\": \"replace\", \"file\": \"src/a.py\", \"find\": \"old\", \"with\": \"new\", \"all\": true },
+      { \"op\": \"replace\", \"file\": \"src/b.py\", \"find\": \"old\", \"with\": \"new\", \"all\": true },
+      { \"op\": \"append\",  \"file\": \"CHANGELOG.md\", \"text\": \"- renamed old to new\" }
+    ]
+  }
+
+This is the only way to edit more than one file in a single invocation. Each
+file is decoded, checked and reported on its own terms, so a batch spanning a
+UTF-8 file and a windows-1252 one is fine: each is written back in its own
+encoding.
+
+Every operation runs against an in-memory copy and nothing reaches disk until
+all of them have succeeded, so a script that fails on its last operation leaves
+every file as it was. The writes themselves are then one atomic rename per
+file; intact cannot make a rename across several files atomic, so a disk error
+partway through that final step can leave earlier files written. A failing
+*operation* — no match, ambiguous anchor, unrepresentable character — never
+writes anything.
+
+Result reporting is per file, one summary line each:
+
+  src/a.py: updated (UTF-8, lf) - applied 1 operation(s)
+  src/b.py: updated (windows-1252, crlf) - applied 1 operation(s)
+
+With --json, batch reports a \"files\" array with one object per file — always an
+array, whether the script touched one file or twenty.",
     },
     Section {
         key: "recipes",
@@ -531,17 +596,38 @@ CREATE A FILE IN A DIRECTORY THAT DOES NOT EXIST YET
   intact create src/components/Foo.tsx --parents --text 'export const Foo = () => null;'
 
 Without --parents a missing directory is an error (exit 8) rather than a
-silently created tree.
+silently created tree. `create` refuses an existing file (exit 7); use `write`
+when replacing the contents is what you meant.
+
+SEVERAL CHANGES TO ONE FILE
+
+Do not run one command per change. Put them in a batch script, so they are
+applied in order and written once, and so a failure partway through leaves the
+file untouched rather than half-edited:
+
+  intact batch app.py --script - <<'EOF'
+  [{\"op\":\"replace\",\"find\":\"DEBUG = True\",\"with\":\"DEBUG = False\"},
+   {\"op\":\"replace\",\"find\":\"log(\",\"with\":\"logger.info(\",\"all\":true},
+   {\"op\":\"append\",\"text\":\"# checked\"}]
+  EOF
+
+This is also the answer to \"translate every comment in this file\" and similar
+sweeps: one script with one operation per comment.
 
 THE SAME CHANGE ACROSS SEVERAL FILES
 
-There is no glob or multi-file mode: one file per invocation, so that each
-file's encoding is decided and reported separately. Loop in the shell:
+Give each operation its own \"file\". This is the only multi-file mode, and it is
+all-or-nothing across every file in the script:
+
+  intact batch --script - <<'EOF'
+  [{\"op\":\"replace\",\"file\":\"src/a.py\",\"find\":\"old\",\"with\":\"new\",\"all\":true},
+   {\"op\":\"replace\",\"file\":\"src/b.py\",\"find\":\"old\",\"with\":\"new\",\"all\":true}]
+  EOF
+
+A shell loop still works when the file list comes from a glob, but note that a
+file where the text does not appear exits 3:
 
   for f in src/*.py; do intact replace \"$f\" --find old --with new --all; done
-
-Note that a file where the text does not appear exits 3, which will show up in
-the loop; use `intact search` first if you want to skip those quietly.
 
 REPLACE A BLOCK OF LINES WITH A FILE'S CONTENTS
 
@@ -585,12 +671,10 @@ MIGRATE A FILE TO UTF-8, THEN EDIT FREELY
   intact convert legacy.txt --to utf-8
   intact replace legacy.txt --find 'mundo' --with '世界'
 
-SEVERAL EDITS, ONE WRITE
+PASS TEXT THAT WILL NOT SURVIVE THE SHELL
 
-  intact batch app.py --script - <<'EOF'
-  [{\"op\":\"replace\",\"find\":\"DEBUG = True\",\"with\":\"DEBUG = False\"},
-   {\"op\":\"append\",\"text\":\"# checked\"}]
-  EOF
+  intact replace app.py --find 'old' --with-file /tmp/block.py
+  generate_block | intact replace app.py --find 'old' --with-file -
 
 SCRIPTING AGAINST THE EXIT CODE
 
@@ -675,19 +759,16 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
         Some(style) => format!(
             "\n{sub} Line endings: always {upper}\n\n\
              Every file in this repository uses {upper} line endings, and every file you create \
-             must too:\n\n\
+             must too. Pass both flags on **every** command that writes:\n\n\
              ```bash\n\
-             # inserted text gets {upper}, and new files are written with it\n\
-             export INTACT_EOL={style}\n\
-             # and refuse to touch a file that is not already {upper}\n\
-             export INTACT_STRICT_EOL=1\n\
+             {cmd} --eol {style} --strict-eol replace FILE --find TEXT --with TEXT\n\
              ```\n\n\
-             Otherwise pass `--eol {style}` on every command. Without a mandate `{cmd}` matches \
-             whatever the file already uses, which is right for a mixed repository and wrong \
-             here.\n\n\
-             With `INTACT_STRICT_EOL=1`, editing a file whose endings differ fails with exit \
-             5 rather than leaving it with mixed endings. That is a pre-existing defect in the \
-             file, not something your edit caused: normalise it in its own step with \
+             `--eol {style}` gives inserted text and new files the right terminators; without it \
+             `{cmd}` matches whatever the file already uses, which is right for a mixed \
+             repository and wrong here.\n\n\
+             `--strict-eol` makes editing a file whose endings differ fail with exit 5 rather \
+             than leaving it with mixed endings. That is a pre-existing defect in the file, not \
+             something your edit caused: normalise it in its own step with \
              `{cmd} convert FILE --newlines {style}`, and keep that separate from the change you \
              were asked to make so the diff stays readable.\n",
             upper = style.to_uppercase()
@@ -701,18 +782,18 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
         Some(label) => format!(
             "\n{sub} Encoding: always `{label}`\n\n\
              Every file in this repository is `{label}`, and every file you create must be too. \
-             Never let `{cmd}` guess:\n\n\
+             Never let `{cmd}` guess — pass both flags on **every** command:\n\n\
              ```bash\n\
-             # every invocation uses this encoding; detection never runs\n\
-             export INTACT_ENCODING={label}\n\
-             # and refuse to write at all if it ever falls back to guessing\n\
-             export INTACT_NO_GUESS=1\n\
+             {cmd} --encoding {label} --no-guess replace FILE --find TEXT --with TEXT\n\
              ```\n\n\
-             If those are not already set in your environment, pass `--encoding {label}` on \
-             **every** `{cmd}` command instead — including `create`, which otherwise makes \
-             UTF-8 files. `{cmd} info FILE` reports `detected_by: environment` or `explicit` \
-             when the encoding was declared, and `guessed` when it was not; `guessed` on a write \
-             is a bug in your invocation, not a detail to ignore.\n\n\
+             `--encoding {label}` applies to `create` too, which otherwise makes UTF-8 files. \
+             `--no-guess` turns a fall-back to statistical detection into an error instead of a \
+             silent wrong guess. `{cmd} info FILE` reports `detected_by: explicit` when the \
+             encoding was declared and `guessed` when it was not; `guessed` on a write is a bug \
+             in your invocation, not a detail to ignore.\n\n\
+             Put the flags in the command every time. Do not try to set this once for the \
+             session — `{cmd}` reads no environment variables and no config file, and each of \
+             your commands may run in a fresh shell anyway.\n\n\
              Text you pass is still UTF-8 — `{cmd}` transcodes it into `{label}` for you. If a \
              character you need cannot be represented in `{label}`, the command fails with exit \
              5; that is a real conflict with the project's encoding policy, so raise it rather \
@@ -767,18 +848,24 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
         }
         if let Some(label) = mandated_encoding {
             policy.push_str(&format!(
-                "\nEvery file here is `{label}`. Set `INTACT_ENCODING={label}` and \
-                 `INTACT_NO_GUESS=1`, or pass `--encoding {label}` on every command — \
-                 including `create`.\n"
+                "\nEvery file here is `{label}`. Pass `--encoding {label} --no-guess` on every \
+                 command — including `create`.\n"
             ));
         }
         if let Some(style) = eol {
             policy.push_str(&format!(
-                "\nEvery file here uses {} line endings. Set `INTACT_EOL={style}` and \
-                 `INTACT_STRICT_EOL=1`, or pass `--eol {style}` on every command. Fix a \
-                 non-conforming file with `{cmd} convert FILE --newlines {style}`.\n",
+                "\nEvery file here uses {} line endings. Pass `--eol {style} --strict-eol` on \
+                 every command. Fix a non-conforming file with \
+                 `{cmd} convert FILE --newlines {style}`.\n",
                 style.to_uppercase()
             ));
+        }
+        if mandated_encoding.is_some() || eol.is_some() {
+            policy.push_str(
+                "\nPass those as flags every time. `intact` reads no environment variables and \
+                 no config file, and each command you run may start a fresh shell, so there is \
+                 nothing to set once.\n",
+            );
         }
         let encoding_line = policy;
         return format!(
@@ -794,6 +881,18 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
              {cmd} insert FILE --line N --text TEXT\n\
              {cmd} delete FILE --lines 10:20\n\
              {cmd} replace-lines FILE --lines 5:7 --text TEXT\n\
+             {cmd} batch FILE --script ops.json                  # several edits at once\n\
+             ```\n\n\
+             **When a file needs more than one change, use `batch`** rather than a run of \
+             separate commands. It takes a JSON script of operations, applies them in order, and \
+             writes once; if any operation fails, nothing is written at all. Give an operation \
+             its own `\"file\"` to edit several files in the same command — that is the only \
+             multi-file mode.\n\n\
+             ```bash\n\
+             {cmd} batch app.py --script - <<'EOF'\n\
+             [{{\"op\":\"replace\",\"find\":\"a\",\"with\":\"b\"}},\n\
+              {{\"op\":\"replace\",\"file\":\"other.py\",\"find\":\"c\",\"with\":\"d\"}}]\n\
+             EOF\n\
              ```\n\n\
              Anchor each `replace` on text that occurs exactly once. A non-zero exit means \
              nothing was written: 3 no match, 4 ambiguous anchor, 5 encoding problem, 6 bad line \
@@ -830,20 +929,37 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
          {cmd} write FILE --text TEXT                   # replace whole contents\n\
          {cmd} create FILE --text TEXT [--parents]      # fails if the file exists\n\
          {cmd} convert FILE --to utf-8                  # migrate the encoding\n\
-         {cmd} batch FILE --script ops.json             # many edits, one atomic write\n\
+         {cmd} batch FILE --script ops.json             # several edits, and several files\n\
          ```\n\n\
-         Text can come from `--text`, `--text-file PATH` or `--text-stdin` (for `replace`: \
-         `--with`, `--with-file`, `--with-stdin`, or `--delete` to remove the match). Add \
-         `--escapes` to write `\\n` inside a single `--text` argument. Line ranges are 1-based \
-         and inclusive: `7`, `5:9`, `5:`, `:9`, `$`, `3:$`, `-3:-1`.\n\n\
+         Text can come from `--text` or `--text-file PATH` (for `replace`: `--with`, \
+         `--with-file`, or `--delete` to remove the match). `--text-file -` reads standard \
+         input, as does any other path argument given `-`. Add `--escapes` to write `\\n` inside \
+         a single `--text` argument. Line ranges are 1-based and inclusive: `7`, `5:9`, `5:`, \
+         `:9`, `$`, `3:$`, `-3:-1`.\n\n\
+         {sub} More than one edit: use `batch`\n\n\
+         A file that needs several changes takes one `{cmd} batch`, not one command per change. \
+         The script is a JSON list of operations applied in order, each seeing the result of the \
+         last, written once at the end; if any operation fails, nothing is written at all. An \
+         operation may name its own `\"file\"`, which is the only way to edit several files in \
+         one command.\n\n\
+         ```bash\n\
+         {cmd} batch app.py --script - <<'EOF'\n\
+         [{{\"op\":\"replace\",\"find\":\"DEBUG = True\",\"with\":\"DEBUG = False\"}},\n\
+          {{\"op\":\"delete\",\"lines\":\"40:42\"}},\n\
+          {{\"op\":\"append\",\"file\":\"CHANGELOG.md\",\"text\":\"- turned off debug\"}}]\n\
+         EOF\n\
+         ```\n\n\
+         Ops: `replace` (find, with, regex, ignore_case, all, occurrence, expect, lines, \
+         no_expand), `insert` (line or after, text), `append`, `prepend` (text), `delete` \
+         (lines), `replace-lines` (lines, text), `write` (text) — plus `file` on any of them. \
+         Run `{cmd} guide batch` for the full schema.\n\n\
          {sub} How to make an edit\n\n\
          1. Read the region you are about to change: `{cmd} view FILE --lines A:B --number`.\n\
          2. Choose an anchor that occurs exactly once in the file, and include enough \
          surrounding text to make it unique. `{cmd} search FILE --find TEXT` reports how many \
          times it occurs.\n\
-         3. Apply the edit. Use `{cmd} batch` when a single file needs several changes, so they \
-         land in one atomic write. For the same change across several files, run one command per \
-         file — there is no glob or multi-file mode.\n\n\
+         3. Apply the edit — a single `replace` for one change, `{cmd} batch` for several or for \
+         more than one file.\n\n\
          {sub} Rules\n\n\
          - **Anchor on unique text.** `replace` refuses an ambiguous anchor (exit 4) instead of \
          guessing. Extend `--find` until it is unique; reach for `--all` only when you actually \
@@ -872,10 +988,36 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
          - **Global flags go before the subcommand**, as in `{cmd} --dry-run replace FILE ...`, \
          not after it. Both orders work, but only the first can be matched by a prefix rule, \
          which is how a preview gets pre-approved while a real write still prompts.\n\
+         - **Pass every setting as a flag.** `{cmd}` reads no environment variables and no \
+         config file, so there is nothing to set once for a session — and if each of your \
+         commands runs in a fresh shell, an `export` would not survive to the next one anyway.\n\
          - **Do not \"fix\" mojibake by hand.** Characters like `Ã©` or `â€™` in a file mean an \
          earlier write used the wrong encoding. Report it rather than editing the damaged text \
          into a different shape.\n"
     )
+}
+
+/// The encoding topic ends with the label list, which is generated from the
+/// build's own table rather than restated by hand — that list used to be a
+/// command of its own (`intact encodings`), which is one more thing to discover
+/// for something nobody needs before they need the topic that explains it.
+fn body(section: &Section) -> std::borrow::Cow<'static, str> {
+    use std::borrow::Cow;
+    if section.key != "encoding" {
+        return Cow::Borrowed(section.body);
+    }
+    let mut out = String::from(section.body);
+    out.push_str("\n\nEVERY LABEL THIS BUILD ACCEPTS\n\n");
+    for label in crate::encoding_util::KNOWN_LABELS {
+        out.push_str("  ");
+        out.push_str(label);
+        out.push('\n');
+    }
+    out.push_str(
+        "\nAliases such as latin1, latin-1, iso-8859-1, cp1252 and ansi_x3.4-1968 are\n\
+         accepted as well.",
+    );
+    Cow::Owned(out)
 }
 
 pub fn find(topic: &str) -> Option<&'static Section> {
@@ -904,7 +1046,7 @@ pub fn render_all() -> String {
     let mut out = String::from("intact manual\n===============\n");
     for section in SECTIONS {
         out.push_str(&format!("\n\n{}\n", heading(section)));
-        out.push_str(section.body);
+        out.push_str(&body(section));
         out.push('\n');
     }
     out.push_str("\n\nSee also: `intact COMMAND --help` for a single command, and\n");
@@ -913,5 +1055,5 @@ pub fn render_all() -> String {
 }
 
 pub fn render_one(section: &Section) -> String {
-    format!("{}\n{}\n", heading(section), section.body)
+    format!("{}\n{}\n", heading(section), body(section))
 }

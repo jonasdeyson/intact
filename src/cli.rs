@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::encoding_util::UnmappablePolicy;
 use crate::lines::{EolMode, LineRange, LineSpec};
@@ -15,24 +15,6 @@ FULL DOCUMENTATION (this binary is self-documenting):
   intact COMMAND --help     per-command options and examples
   intact instructions       a drop-in section for a project's CLAUDE.md
 
-ENVIRONMENT:
-  INTACT_ENCODING   Encoding to use for every invocation, as if --encoding
-                      were passed. --encoding still overrides it. Set this in a
-                      project that mandates one encoding, e.g.
-                      `export INTACT_ENCODING=latin1`, so that detection never
-                      runs and new files are created in that encoding too.
-  INTACT_NO_GUESS   Set to 1 to refuse writing to any file whose encoding was
-                      only statistically guessed (same as --no-guess).
-  INTACT_EOL        Line endings for every invocation, as if --eol were
-                      passed: auto, lf, crlf, cr or keep. Set this in a project
-                      that mandates one style, so new files get it too.
-  INTACT_STRICT_EOL Set to 1 to refuse writing to any file whose existing line
-                      endings differ from the mandated ones (same as
-                      --strict-eol). Requires --eol lf|crlf|cr.
-  INTACT_SHOW_DIFF  Set to 1 to print a unified diff of every edit as it is
-                      applied (same as --show-diff), so that a change is
-                      visible without a separate preview command.
-
 EXIT CODES:
   0  success
   1  generic failure
@@ -46,13 +28,14 @@ EXIT CODES:
   9  I/O error
 
 TEXT INPUT:
-  Every command that takes text accepts --text/-t, --text-file PATH, or
-  --text-stdin. Text supplied to intact is always UTF-8; it is transcoded
-  into the file's own encoding on write. --escapes interprets \\n, \\t, \\uXXXX
-  so multi-line content fits in one argument.
+  Every command that takes text accepts --text/-t or --text-file PATH
+  (`--text-file -` reads standard input). Text supplied to intact is always
+  UTF-8; it is transcoded into the file's own encoding on write. --escapes
+  interprets \\n, \\t, \\uXXXX in --text, --find and --with, so multi-line
+  content fits in one argument.
 
 LINE RANGES (--lines, --line, --after), 1-based and inclusive:
-  7  5:9  5:  :9  $  3:$  -1  -3:-1  5..9
+  7  5:9  5:  :9  $  3:$  -1  -3:-1
 
 EXAMPLES:
   intact info notes.txt
@@ -64,6 +47,8 @@ EXAMPLES:
   intact delete legacy.txt --lines 10:20
   intact replace-lines main.rs --lines 5:7 --text-file /tmp/block.txt
   intact convert legacy.txt --to utf-8
+  intact --show-diff replace app.py --find x --with y   # global flags first
+  intact batch --script ops.json                        # many edits, many files
 ";
 
 #[derive(Parser, Debug)]
@@ -97,7 +82,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub show_diff: bool,
 
-    /// Unchanged lines to show either side of a change in a diff
+    /// Unchanged lines to show either side of a change, in a --dry-run or --show-diff diff
     #[arg(long, global = true, value_name = "N", default_value_t = crate::diff::DEFAULT_CONTEXT)]
     pub diff_context: usize,
 
@@ -113,7 +98,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "POLICY", default_value = "error")]
     pub unmappable: UnmappablePolicy,
 
-    /// Line endings to use for inserted text [default: auto, or $INTACT_EOL]
+    /// Line endings to use for inserted text [default: auto]
     #[arg(long, global = true, value_name = "MODE")]
     pub eol: Option<EolMode>,
 
@@ -121,7 +106,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub strict_eol: bool,
 
-    /// Interpret backslash escapes (\n, \t, \r, \0, \\, \xNN, \uXXXX) in --text and --find
+    /// Interpret backslash escapes (\n, \t, \r, \0, \\, \xNN, \uXXXX) in --text, --find and --with
     #[arg(long, global = true)]
     pub escapes: bool,
 
@@ -143,6 +128,123 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Command,
+}
+
+// ------------------------------------------------- per-command global help
+//
+// The global options are declared once, on `Cli`, so that each one parses in
+// either position: `intact --show-diff replace FILE ...` and
+// `intact replace FILE ... --show-diff` mean the same thing. What clap charges
+// for that is listing all fourteen of them under every subcommand, so
+// `intact info --help` advertises --backup, --dry-run and --unmappable, none of
+// which `info` reads.
+//
+// The table below says which globals each command actually honours, and
+// `hide_unused_globals` hides the rest from that command's help. Only the help
+// text changes: every global still parses everywhere, so a caller that puts
+// `--encoding LABEL --no-guess` in front of every command uniformly - which
+// `intact instructions --encoding LABEL` tells it to do - keeps working.
+
+/// Every global option, by field name. `globals_table_is_complete` keeps this
+/// in step with the struct above.
+const ALL_GLOBALS: &[&str] = &[
+    "json",
+    "dry_run",
+    "show_diff",
+    "diff_context",
+    "backup",
+    "encoding",
+    "unmappable",
+    "eol",
+    "strict_eol",
+    "escapes",
+    "no_guess",
+    "lossy",
+    "force",
+    "quiet",
+];
+
+/// Opening a file at all, and reporting what happened.
+const FILE: &[&str] = &["json", "encoding"];
+/// Writing one: preview it, and say less about it.
+const WRITE: &[&str] = &["dry_run", "show_diff", "diff_context", "quiet"];
+/// Keeping the previous contents of a file that already existed.
+const BACKUP: &[&str] = &["backup"];
+/// The guards that refuse to write to an existing file, and their overrides.
+const GUARD: &[&str] = &["no_guess", "force", "lossy"];
+/// Encoding text intact adds into the file's own encoding.
+const ENCODE: &[&str] = &["unmappable"];
+/// Line endings for text intact adds.
+const EOL: &[&str] = &["eol"];
+/// Enforcing one line-ending style, which needs `--eol` to name it.
+const MANDATE: &[&str] = &["eol", "strict_eol"];
+/// Backslash escapes in `--text`, `--find` and `--with`.
+const ESCAPES: &[&str] = &["escapes"];
+
+/// The groups each subcommand honours. Everything else is hidden from its help.
+#[rustfmt::skip]
+const GLOBALS_BY_COMMAND: &[(&str, &[&[&str]])] = &[
+    ("info",          &[FILE]),
+    ("view",          &[FILE]),
+    ("search",        &[FILE, ESCAPES]),
+    ("replace",       &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
+    ("insert",        &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
+    ("append",        &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
+    ("prepend",       &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
+    ("replace-lines", &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
+    ("write",         &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
+    // Deletes nothing but whole lines: no new text is encoded, and there is no
+    // --text to unescape. --strict-eol still guards the write.
+    ("delete",        &[FILE, WRITE, BACKUP, GUARD, MANDATE]),
+    // The file cannot already exist, so there is nothing to back up, nothing
+    // whose encoding was guessed, and no existing line endings to enforce.
+    ("create",        &[FILE, WRITE, ENCODE, EOL, ESCAPES]),
+    // Line endings are `convert --newlines`, not the global --eol.
+    ("convert",       &[FILE, WRITE, BACKUP, GUARD, ENCODE]),
+    // Text comes from JSON, which has escapes of its own.
+    ("batch",         &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE]),
+    ("guide",         &[&["json"]]),
+    // --encoding and --eol are read as "this project mandates X" and end up in
+    // the generated text.
+    ("instructions",  &[&["encoding", "eol"]]),
+];
+
+fn hide_unused_globals(mut cmd: clap::Command) -> clap::Command {
+    // Globals live on the parent until `build` copies them into each
+    // subcommand, and it is those copies that a subcommand's help renders - so
+    // the hiding has to happen after the build. `mut_args` is the only way to
+    // reach them at that point: it rewrites the arguments in place, where
+    // anything that removes and re-adds one (`mut_arg`) leaves clap's
+    // long-flag lookup table pointing at the wrong arguments.
+    cmd.build();
+    for sub in cmd.get_subcommands_mut() {
+        let name = sub.get_name().to_owned();
+        // Anything absent from the table - clap's own `help` subcommand - is
+        // left as it is.
+        let Some((_, groups)) = GLOBALS_BY_COMMAND.iter().find(|(n, _)| *n == name) else {
+            continue;
+        };
+        let shown: Vec<&str> = groups.iter().flat_map(|g| g.iter().copied()).collect();
+        let built = std::mem::take(sub);
+        *sub = built.mut_args(|arg| {
+            let id = arg.get_id().as_str();
+            if ALL_GLOBALS.contains(&id) && !shown.contains(&id) {
+                arg.hide(true)
+            } else {
+                arg
+            }
+        });
+    }
+    cmd
+}
+
+/// `Cli::parse()` with the per-command help filtering applied.
+pub fn parse() -> Cli {
+    let matches = hide_unused_globals(Cli::command()).get_matches();
+    match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(err) => err.exit(),
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -249,7 +351,9 @@ pub enum Command {
     /// Replace a range of lines with new text
     #[command(
         name = "replace-lines",
-        visible_alias = "set-lines",
+        // Hidden rather than visible: a second name for one command is one more
+        // thing to disambiguate, and it earns nothing in the help output.
+        alias = "set-lines",
         long_about = "Replace a range of lines with new text.\n\n\
                       If the replaced region ended with a line terminator the replacement gets \
                       one too, so replacing the last line of a file that lacks a final newline \
@@ -292,51 +396,57 @@ pub enum Command {
     )]
     Convert(ConvertArgs),
 
-    /// Apply several operations atomically from a JSON script
+    /// Apply several operations to one or more files from a JSON script
     #[command(
-        long_about = "Apply several operations with a single atomic write.\n\n\
+        long_about = "Apply several operations from a JSON script, with one write per file.\n\n\
+                      This is the way to make more than one edit in a single command. \
                       Operations run in order and each sees the result of the previous one, so \
                       line numbers refer to the state at that step. If any operation fails, \
-                      nothing is written at all. See `intact guide batch` for the schema.",
+                      nothing is written at all — not for that file, and not for any other.\n\n\
+                      An operation may carry its own \"file\", which is how one script edits \
+                      several files; FILE on the command line is the default for the operations \
+                      that do not. This is the only multi-file mode: every other command takes \
+                      one file, so that each file's encoding is decided and reported separately. \
+                      See `intact guide batch` for the schema.",
         after_help = "EXAMPLE SCRIPT:\n  \
                       {\"ops\": [\n    \
                         {\"op\": \"replace\", \"find\": \"DEBUG = True\", \"with\": \"DEBUG = False\"},\n    \
                         {\"op\": \"delete\", \"lines\": \"40:42\"},\n    \
-                        {\"op\": \"insert\", \"line\": 1, \"text\": \"# generated\"}\n  \
+                        {\"op\": \"insert\", \"line\": 1, \"text\": \"# generated\"},\n    \
+                        {\"op\": \"replace\", \"file\": \"other.py\", \"find\": \"x\", \"with\": \"y\"}\n  \
                       ]}\n\nEXAMPLES:\n  \
                       intact batch app.py --script ops.json\n  \
-                      intact batch app.py --script -\n"
+                      intact batch app.py --script -          # script on stdin\n  \
+                      intact batch --script ops.json          # every op names its own file\n"
     )]
     Batch(BatchArgs),
-
-    /// List the encoding labels this build understands
-    Encodings,
 
     /// Print the complete manual, or one topic of it
     #[command(
         long_about = "Print the built-in manual.\n\n\
                       With no topic, the whole manual is printed. `--list` names the topics; \
-                      passing a topic prints just that section.",
+                      passing a topic prints just that section. `intact guide encoding` ends \
+                      with the list of encoding labels this build understands.",
         after_help = "EXAMPLES:\n  \
                       intact guide\n  \
                       intact guide --list\n  \
                       intact guide recipes\n  \
-                      intact guide encoding\n"
+                      intact guide encoding      # detection, labels, converting\n"
     )]
     Guide(GuideArgs),
 
     /// Print a ready-to-paste CLAUDE.md / AGENTS.md section describing this tool
     #[command(
-        visible_alias = "claude-md",
+        alias = "claude-md",
         long_about = "Print a Markdown section documenting intact for another project's agent \
                       instructions file (CLAUDE.md, AGENTS.md, .cursorrules, ...).\n\n\
                       Append the output to the target project's instructions file so that an \
                       agent working there knows the tool exists, when to reach for it, and how \
                       to read its exit codes.\n\n\
                       If the target project mandates one encoding for every file, pass \
-                      --encoding LABEL: the generated section then tells the agent to pin that \
-                      encoding (via INTACT_ENCODING and INTACT_NO_GUESS, or the flag on \
-                      every command) instead of letting detection guess.\n\n\
+                      --encoding LABEL: the generated section then tells the agent to pass \
+                      --encoding and --no-guess on every command instead of letting detection \
+                      guess.\n\n\
                       If the agent works from Windows while this binary lives in WSL, pass \
                       --wsl. The generated section then opens with the rule that every command \
                       in it is prefixed with `wsl.exe`, and covers the traps that come with \
@@ -394,20 +504,31 @@ pub struct FileArgs {
     pub file: PathBuf,
 }
 
-/// `--text` / `--text-file` / `--text-stdin`.
+/// Counts of occurrences and matches. Zero is never a sensible answer for any
+/// of them - `--max 0` finds nothing and reports "no match", `--expect 0` can
+/// only ever exit 3 or 4, `--occurrence 0` names no occurrence - so they are
+/// rejected as the arguments rather than as results.
+fn at_least_one(value: &str) -> Result<usize, String> {
+    match value.parse::<usize>() {
+        Ok(n) if n > 0 => Ok(n),
+        Ok(_) => Err("must be 1 or more".to_string()),
+        Err(_) => Err(format!("`{value}` is not a whole number")),
+    }
+}
+
+/// `--text` / `--text-file`. Every command that flattens this needs the text,
+/// so the pair is a required group: the usage line then says so, rather than
+/// each command discovering it once it has already opened the file.
 #[derive(Args, Debug, Clone)]
+#[group(required = true, multiple = false)]
 pub struct TextSource {
     /// Text to use (UTF-8)
     #[arg(long, short = 't', value_name = "TEXT", allow_hyphen_values = true)]
     pub text: Option<String>,
 
-    /// Read the text from a UTF-8 file
-    #[arg(long, value_name = "PATH", conflicts_with = "text")]
+    /// Read the text from a UTF-8 file ("-" for standard input)
+    #[arg(long, value_name = "PATH")]
     pub text_file: Option<PathBuf>,
-
-    /// Read the text from standard input (UTF-8)
-    #[arg(long, conflicts_with_all = ["text", "text_file"])]
-    pub text_stdin: bool,
 }
 
 #[derive(Args, Debug)]
@@ -448,10 +569,6 @@ pub struct CreateArgs {
     #[command(flatten)]
     pub text: TextSource,
 
-    /// Overwrite the file if it already exists
-    #[arg(long)]
-    pub overwrite: bool,
-
     /// Create missing parent directories
     #[arg(long, short = 'p')]
     pub parents: bool,
@@ -484,7 +601,7 @@ pub struct SearchArgs {
     #[arg(long, short = 'f', value_name = "TEXT", allow_hyphen_values = true)]
     pub find: Option<String>,
 
-    /// Read the search text from a UTF-8 file
+    /// Read the search text from a UTF-8 file ("-" for standard input)
     #[arg(long, value_name = "PATH", conflicts_with = "find")]
     pub find_file: Option<PathBuf>,
 
@@ -501,7 +618,7 @@ pub struct SearchArgs {
     pub lines: Option<LineRange>,
 
     /// Stop after this many matches
-    #[arg(long, short = 'm', value_name = "N")]
+    #[arg(long, short = 'm', value_name = "N", value_parser = at_least_one)]
     pub max: Option<usize>,
 
     /// Exit 0 with no output even when nothing matches
@@ -518,7 +635,7 @@ pub struct ReplaceArgs {
     #[arg(long, short = 'f', value_name = "TEXT", allow_hyphen_values = true)]
     pub find: Option<String>,
 
-    /// Read the search text from a UTF-8 file
+    /// Read the search text from a UTF-8 file ("-" for standard input)
     #[arg(long, value_name = "PATH", conflicts_with = "find")]
     pub find_file: Option<PathBuf>,
 
@@ -531,16 +648,12 @@ pub struct ReplaceArgs {
     )]
     pub with: Option<String>,
 
-    /// Read the replacement from a UTF-8 file
+    /// Read the replacement from a UTF-8 file ("-" for standard input)
     #[arg(long = "with-file", value_name = "PATH", conflicts_with = "with")]
     pub with_file: Option<PathBuf>,
 
-    /// Read the replacement from standard input
-    #[arg(long = "with-stdin", conflicts_with_all = ["with", "with_file"])]
-    pub with_stdin: bool,
-
     /// Remove the matched text instead of replacing it
-    #[arg(long, conflicts_with_all = ["with", "with_file", "with_stdin"])]
+    #[arg(long, conflicts_with_all = ["with", "with_file"])]
     pub delete: bool,
 
     /// Treat the search text as a regular expression ($1, ${name} expand in the replacement)
@@ -556,11 +669,11 @@ pub struct ReplaceArgs {
     pub all: bool,
 
     /// Replace only the Nth occurrence (1-based)
-    #[arg(long, value_name = "N", conflicts_with = "all")]
+    #[arg(long, value_name = "N", conflicts_with = "all", value_parser = at_least_one)]
     pub occurrence: Option<usize>,
 
     /// Require exactly N occurrences, and replace them all
-    #[arg(long, value_name = "N", conflicts_with_all = ["all", "occurrence"])]
+    #[arg(long, value_name = "N", conflicts_with_all = ["all", "occurrence"], value_parser = at_least_one)]
     pub expect: Option<usize>,
 
     /// Restrict the replacement to a line range
@@ -568,11 +681,16 @@ pub struct ReplaceArgs {
     pub lines: Option<LineRange>,
 
     /// Do not expand $1 / ${name} in a regex replacement
-    #[arg(long)]
+    #[arg(long, requires = "regex")]
     pub no_expand: bool,
 }
 
+/// An insert has to say where, so `--line` and `--after` are one required
+/// group rather than two options that happen to be checked once the file is
+/// already open. (`batch` builds these args from JSON, which clap never sees,
+/// so `ops::insert` still checks for itself.)
 #[derive(Args, Debug)]
+#[command(group = ArgGroup::new("at").required(true).args(["line", "after"]))]
 pub struct InsertArgs {
     /// File to edit
     pub file: PathBuf,
@@ -582,13 +700,7 @@ pub struct InsertArgs {
     pub line: Option<LineSpec>,
 
     /// Insert after this line
-    #[arg(
-        long,
-        short = 'a',
-        value_name = "LINE",
-        allow_hyphen_values = true,
-        conflicts_with = "line"
-    )]
+    #[arg(long, short = 'a', value_name = "LINE", allow_hyphen_values = true)]
     pub after: Option<LineSpec>,
 
     #[command(flatten)]
@@ -648,10 +760,80 @@ pub enum BomMode {
 
 #[derive(Args, Debug)]
 pub struct BatchArgs {
-    /// File to edit
-    pub file: PathBuf,
+    /// Default file for operations that do not name a "file" of their own
+    pub file: Option<PathBuf>,
 
     /// JSON script describing the operations ("-" for standard input)
     #[arg(long, short = 's', value_name = "PATH")]
     pub script: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn global_ids() -> HashSet<String> {
+        Cli::command()
+            .get_arguments()
+            .filter(|a| a.is_global_set())
+            .map(|a| a.get_id().to_string())
+            .collect()
+    }
+
+    /// A global that nothing lists is invisible everywhere; an id that is not a
+    /// global (a typo, or a renamed field) makes `mut_arg` panic at startup.
+    #[test]
+    fn globals_table_is_complete() {
+        let actual = global_ids();
+        let listed: HashSet<String> = ALL_GLOBALS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(actual, listed, "ALL_GLOBALS is out of step with Cli");
+
+        for (name, groups) in GLOBALS_BY_COMMAND {
+            for id in groups.iter().flat_map(|g| g.iter()) {
+                assert!(
+                    listed.contains(*id),
+                    "{name}: '{id}' is not a global option"
+                );
+            }
+        }
+    }
+
+    /// Every subcommand needs an entry, or it keeps the unfiltered list.
+    #[test]
+    fn every_subcommand_is_in_the_table() {
+        for sub in Cli::command().get_subcommands() {
+            let name = sub.get_name();
+            assert!(
+                GLOBALS_BY_COMMAND.iter().any(|(n, _)| *n == name),
+                "{name} is missing from GLOBALS_BY_COMMAND"
+            );
+        }
+    }
+
+    #[test]
+    fn irrelevant_globals_are_hidden_but_still_parse() {
+        let cmd = hide_unused_globals(Cli::command());
+        let info = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "info")
+            .expect("info subcommand");
+        let hidden: HashSet<&str> = info
+            .get_arguments()
+            .filter(|a| a.is_hide_set())
+            .map(|a| a.get_id().as_str())
+            .collect();
+        assert!(hidden.contains("backup"));
+        assert!(hidden.contains("dry_run"));
+        assert!(!hidden.contains("json"));
+        assert!(!hidden.contains("encoding"));
+
+        // Hiding is a help-only change: the flag is still accepted, in either
+        // position, so existing scripts keep working.
+        let cmd = hide_unused_globals(Cli::command());
+        let matches = cmd
+            .try_get_matches_from(["intact", "info", "--backup", "f.txt"])
+            .expect("--backup still parses on info");
+        assert!(Cli::from_arg_matches(&matches).unwrap().backup);
+    }
 }

@@ -437,24 +437,41 @@ fn show_diff_prints_the_change_and_applies_it() {
     assert!(text.contains("updated"), "{text}");
 }
 
+/// Every setting is a flag. An agent typically runs each command in a fresh
+/// shell, so a variable set by one invocation is gone by the next; a setting
+/// that applies only sometimes is worse than one that never applies.
 #[test]
-fn env_show_diff_covers_every_edit() {
-    let sb = Sandbox::new("envdiff");
-    let f = sb.file("a.txt", b"one\ntwo\n");
+fn the_environment_is_ignored_entirely() {
+    let sb = Sandbox::new("noenv");
+    let f = sb.file("a.txt", LATIN1);
+    let p = f.to_str().unwrap();
+
+    // Neither a diff switch nor an encoding mandate leaks in from the
+    // environment, and a value that would once have been rejected as a bad
+    // label is now simply not read.
     let out = run_env(
-        &[("INTACT_SHOW_DIFF", "1")],
         &[
-            "replace",
-            f.to_str().unwrap(),
-            "--find",
-            "two",
-            "--with",
-            "2",
+            ("INTACT_SHOW_DIFF", "1"),
+            ("INTACT_ENCODING", "nonsense-9"),
+            ("INTACT_NO_GUESS", "1"),
+            ("INTACT_EOL", "wobbly"),
+            ("INTACT_STRICT_EOL", "1"),
         ],
+        &["--json", "info", p],
     );
-    assert_eq!(code(&out), 0);
-    assert_eq!(read(&f), b"one\n2\n".to_vec());
-    assert!(stdout(&out).contains("-two\n+2\n"), "{}", stdout(&out));
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["detected_by"], "guessed", "encoding came from the env");
+
+    // An edit under INTACT_SHOW_DIFF prints no diff, and INTACT_NO_GUESS does
+    // not block the write to this guessed-encoding file.
+    let out = run_env(
+        &[("INTACT_SHOW_DIFF", "1"), ("INTACT_NO_GUESS", "1")],
+        &["replace", p, "--find", "café", "--with", "thé"],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!stdout(&out).contains("---"), "{}", stdout(&out));
+    assert_eq!(read(&f), b"th\xE9\nr\xE9sum\xE9\n".to_vec());
 }
 
 #[test]
@@ -910,6 +927,131 @@ fn batch_failure_leaves_the_file_untouched() {
     assert_eq!(read(&f), LATIN1.to_vec());
 }
 
+/// batch is the only multi-file mode. Each file keeps its own encoding, which
+/// is the whole reason every other command takes exactly one.
+#[test]
+fn batch_edits_several_files_each_in_its_own_encoding() {
+    let sb = Sandbox::new("batchmulti");
+    let utf8 = sb.file("a.txt", "café\nold\n".as_bytes());
+    let latin1 = sb.file("b.txt", b"caf\xE9\nold\n");
+
+    let script = sb.file(
+        "ops.json",
+        format!(
+            r#"[{{"op":"replace","file":{a:?},"find":"old","with":"nouveauté"}},
+                {{"op":"replace","file":{b:?},"find":"old","with":"nouveauté"}},
+                {{"op":"append","file":{a:?},"text":"fin"}}]"#,
+            a = utf8.to_str().unwrap(),
+            b = latin1.to_str().unwrap(),
+        )
+        .as_bytes(),
+    );
+
+    let out = run(&["batch", "--script", script.to_str().unwrap()]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    // The UTF-8 file gets UTF-8 bytes; the windows-1252 one gets 0xE9.
+    assert_eq!(read(&utf8), "café\nnouveauté\nfin\n".as_bytes().to_vec());
+    assert_eq!(read(&latin1), b"caf\xE9\nnouveaut\xE9\n".to_vec());
+
+    // One summary line per file, in first-touched order.
+    let text = stdout(&out);
+    assert_eq!(text.lines().count(), 2, "{text}");
+    assert!(text.contains("windows-1252"), "{text}");
+}
+
+/// A failure anywhere in the script leaves *every* file as it was, not just
+/// the one the failing operation named.
+#[test]
+fn batch_failure_leaves_every_file_untouched() {
+    let sb = Sandbox::new("batchmultifail");
+    let a = sb.file("a.txt", b"one\nold\n");
+    let b = sb.file("b.txt", b"two\nold\n");
+    let script = sb.file(
+        "ops.json",
+        format!(
+            r#"[{{"op":"replace","file":{a:?},"find":"old","with":"new"}},
+                {{"op":"replace","file":{b:?},"find":"old","with":"new"}},
+                {{"op":"replace","file":{b:?},"find":"absent","with":"x"}}]"#,
+            a = a.to_str().unwrap(),
+            b = b.to_str().unwrap(),
+        )
+        .as_bytes(),
+    );
+
+    let out = run(&["batch", "--script", script.to_str().unwrap()]);
+    assert_eq!(code(&out), 3);
+    // The error names both the operation index and the file it was aimed at.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("operation 3"), "{err}");
+    assert!(err.contains("b.txt"), "{err}");
+    assert_eq!(read(&a), b"one\nold\n".to_vec(), "a.txt was written");
+    assert_eq!(read(&b), b"two\nold\n".to_vec(), "b.txt was written");
+}
+
+#[test]
+fn batch_file_argument_is_the_default_for_ops_without_one() {
+    let sb = Sandbox::new("batchdefault");
+    let a = sb.file("a.txt", b"one\nold\n");
+    let b = sb.file("b.txt", b"two\n");
+    let script = sb.file(
+        "ops.json",
+        format!(
+            r#"[{{"op":"replace","find":"old","with":"new"}},
+                {{"op":"append","file":{b:?},"text":"end"}}]"#,
+            b = b.to_str().unwrap(),
+        )
+        .as_bytes(),
+    );
+
+    let out = run(&[
+        "batch",
+        a.to_str().unwrap(),
+        "--script",
+        script.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&a), b"one\nnew\n".to_vec());
+    assert_eq!(read(&b), b"two\nend\n".to_vec());
+
+    // An op with no file and no default is a usage error naming the operation.
+    let script = sb.file("bare.json", br#"[{"op":"append","text":"x"}]"#);
+    let out = run(&["batch", "--script", script.to_str().unwrap()]);
+    assert_eq!(code(&out), 2);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("operation 1"));
+}
+
+/// The result shape must not change with the number of files: a caller should
+/// never have to branch on the count.
+#[test]
+fn batch_json_always_reports_a_files_array() {
+    let sb = Sandbox::new("batchjson");
+    let a = sb.file("a.txt", b"one\nold\n");
+    let script = sb.file(
+        "ops.json",
+        br#"[{"op":"replace","find":"old","with":"new"}]"#,
+    );
+
+    let out = run(&[
+        "--json",
+        "batch",
+        a.to_str().unwrap(),
+        "--script",
+        script.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["command"], "batch");
+    assert_eq!(v["operations"], 1);
+    assert_eq!(v["changed"], true);
+    let files = v["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["summary"], "applied 1 operation(s)");
+    assert_eq!(files[0]["encoding"], "UTF-8");
+    assert!(files[0]["path"].as_str().unwrap().ends_with("a.txt"));
+}
+
 #[test]
 fn undecodable_file_is_refused_without_lossy() {
     let sb = Sandbox::new("broken");
@@ -1017,18 +1159,24 @@ fn run_env(env: &[(&str, &str)], args: &[&str]) -> Output {
     cmd.output().expect("failed to run intact")
 }
 
-/// A project that mandates one encoding must be able to pin it once, rather
-/// than depending on every invocation remembering --encoding.
+/// A project that mandates one encoding states it with --encoding on every
+/// command, including `create`, which otherwise makes UTF-8 files.
 #[test]
-fn env_encoding_pins_the_encoding_for_every_command() {
-    let sb = Sandbox::new("envenc");
-    let env = [("INTACT_ENCODING", "latin1")];
+fn the_encoding_flag_covers_creation_and_editing() {
+    let sb = Sandbox::new("encflag");
 
     // A new file is created in the mandated encoding, not UTF-8.
     let f = sb.dir.join("notes.txt");
     let p = f.to_str().unwrap();
     assert_eq!(
-        code(&run_env(&env, &["create", p, "--text", "Olá mundo"])),
+        code(&run(&[
+            "--encoding",
+            "latin1",
+            "create",
+            p,
+            "--text",
+            "Olá mundo"
+        ])),
         0
     );
     assert_eq!(read(&f), b"Ol\xE1 mundo\n".to_vec());
@@ -1036,26 +1184,28 @@ fn env_encoding_pins_the_encoding_for_every_command() {
     // Edits use it too, with no detection in play. This exact edit fails when
     // the encoding is guessed, because a short file can be read as
     // windows-1250, which has no 'ã'.
-    let out = run_env(&env, &["replace", p, "--find", "mundo", "--with", "mundão"]);
+    let out = run(&[
+        "--encoding",
+        "latin1",
+        "replace",
+        p,
+        "--find",
+        "mundo",
+        "--with",
+        "mundão",
+    ]);
     assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(read(&f), b"Ol\xE1 mund\xE3o\n".to_vec());
 
-    // info attributes the encoding to the environment.
-    let out = run_env(&env, &["--json", "info", p]);
+    // info attributes the encoding to the flag.
+    let out = run(&["--json", "--encoding", "latin1", "info", p]);
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(v["encoding"], "windows-1252");
-    assert_eq!(v["detected_by"], "environment");
-
-    // An explicit flag still wins over the environment.
-    let out = run_env(&env, &["--json", "--encoding", "utf-8", "info", p]);
-    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
-    assert_eq!(v["encoding"], "UTF-8");
     assert_eq!(v["detected_by"], "explicit");
 
-    // A bad label in the environment is reported as such, not ignored.
-    let out = run_env(&[("INTACT_ENCODING", "nonsense-9")], &["info", p]);
+    // A bad label is a usage error naming the flag's value.
+    let out = run(&["--encoding", "nonsense-9", "info", p]);
     assert_eq!(code(&out), 2);
-    assert!(String::from_utf8_lossy(&out.stderr).contains("INTACT_ENCODING"));
 }
 
 #[test]
@@ -1077,12 +1227,6 @@ fn no_guess_refuses_writes_to_undeclared_encodings() {
     assert_eq!(code(&out), 5);
     assert!(String::from_utf8_lossy(&out.stderr).contains("guessed"));
     assert_eq!(read(&f), LATIN1.to_vec());
-
-    let out = run_env(
-        &[("INTACT_NO_GUESS", "1")],
-        &["replace", p, "--find", "café", "--with", "thé"],
-    );
-    assert_eq!(code(&out), 5);
 
     // Declaring the encoding satisfies it.
     let out = run(&[
@@ -1120,49 +1264,49 @@ fn no_guess_refuses_writes_to_undeclared_encodings() {
 
 /// The line-ending equivalent of the encoding mandate.
 #[test]
-fn env_eol_pins_line_endings_for_every_command() {
-    let sb = Sandbox::new("enveol");
-    let env = [("INTACT_EOL", "crlf")];
+fn the_eol_flag_covers_creation_and_editing() {
+    let sb = Sandbox::new("eolflag");
 
-    // A new file gets the mandated endings, not the LF default.
+    // A new file gets the requested endings, not the LF default.
     let f = sb.dir.join("new.txt");
     let p = f.to_str().unwrap();
     assert_eq!(
-        code(&run_env(
-            &env,
-            &["create", p, "--escapes", "--text", "a\\nb"]
-        )),
+        code(&run(&[
+            "--eol",
+            "crlf",
+            "create",
+            p,
+            "--escapes",
+            "--text",
+            "a\\nb"
+        ])),
         0
     );
     assert_eq!(read(&f), b"a\r\nb\r\n".to_vec());
 
     // Inserted text too.
-    assert_eq!(code(&run_env(&env, &["append", p, "--text", "c"])), 0);
+    assert_eq!(
+        code(&run(&["--eol", "crlf", "append", p, "--text", "c"])),
+        0
+    );
     assert_eq!(read(&f), b"a\r\nb\r\nc\r\n".to_vec());
 
-    // The flag still overrides the environment.
+    // Without the flag, a new file follows the LF default.
     let g = sb.dir.join("lf.txt");
     assert_eq!(
-        code(&run_env(
-            &env,
-            &[
-                "create",
-                g.to_str().unwrap(),
-                "--eol",
-                "lf",
-                "--escapes",
-                "--text",
-                "a\\nb"
-            ]
-        )),
+        code(&run(&[
+            "create",
+            g.to_str().unwrap(),
+            "--escapes",
+            "--text",
+            "a\\nb"
+        ])),
         0
     );
     assert_eq!(read(&g), b"a\nb\n".to_vec());
 
-    // A bad value names the variable.
-    let out = run_env(&[("INTACT_EOL", "wobbly")], &["view", p]);
-    assert_eq!(code(&out), 2);
-    assert!(String::from_utf8_lossy(&out.stderr).contains("INTACT_EOL"));
+    // A bad value is a usage error.
+    assert_eq!(code(&run(&["--eol", "wobbly", "view", p])), 2);
 }
 
 #[test]
@@ -1186,15 +1330,6 @@ fn strict_eol_refuses_to_create_mixed_endings() {
     assert!(err.contains("not CRLF"), "{err}");
     assert!(err.contains("--newlines crlf"), "hint missing: {err}");
     assert_eq!(read(&f), b"one\ntwo\n".to_vec());
-
-    // Same via the environment.
-    assert_eq!(
-        code(&run_env(
-            &[("INTACT_EOL", "crlf"), ("INTACT_STRICT_EOL", "1")],
-            &["append", p, "--text", "three"]
-        )),
-        5
-    );
 
     // The suggested remedy needs no --to, and then the edit succeeds.
     assert_eq!(code(&run(&["convert", p, "--newlines", "crlf"])), 0);
@@ -1267,8 +1402,7 @@ fn convert_can_normalise_line_endings_alone() {
 fn instructions_can_state_a_project_encoding_mandate() {
     let text = stdout(&run(&["instructions", "--encoding", "latin1"]));
     assert!(text.contains("Encoding: always `windows-1252`"));
-    assert!(text.contains("INTACT_ENCODING=windows-1252"));
-    assert!(text.contains("INTACT_NO_GUESS=1"));
+    assert!(text.contains("--encoding windows-1252 --no-guess"));
 
     let brief = stdout(&run(&[
         "instructions",
@@ -1280,15 +1414,52 @@ fn instructions_can_state_a_project_encoding_mandate() {
 
     // Without the flag, no encoding policy is asserted.
     let plain = stdout(&run(&["instructions"]));
-    assert!(!plain.contains("INTACT_ENCODING"));
+    assert!(!plain.contains("Encoding: always"));
+}
+
+/// The generated section must never send an agent to an environment variable:
+/// each of its commands may run in a fresh shell, so an `export` would not
+/// survive to the next one.
+#[test]
+fn instructions_never_mention_environment_variables() {
+    for args in [
+        vec!["instructions"],
+        vec!["instructions", "--brief"],
+        vec!["instructions", "--encoding", "latin1", "--eol", "crlf"],
+        vec![
+            "instructions",
+            "--brief",
+            "--encoding",
+            "latin1",
+            "--eol",
+            "crlf",
+        ],
+    ] {
+        let text = stdout(&run(&args));
+        assert!(!text.contains("INTACT_"), "{args:?} still names a variable");
+        assert!(!text.contains("export "), "{args:?} still says `export`");
+    }
+}
+
+/// batch is the answer to "this file needs several edits", so an agent handed
+/// only the generated section has to learn it exists.
+#[test]
+fn instructions_recommend_batch_for_multiple_edits() {
+    for args in [vec!["instructions"], vec!["instructions", "--brief"]] {
+        let text = stdout(&run(&args));
+        assert!(text.contains("batch"), "{args:?} does not mention batch");
+        assert!(
+            text.contains("\"file\""),
+            "{args:?} does not show the multi-file form"
+        );
+    }
 }
 
 #[test]
 fn instructions_can_state_a_line_ending_mandate() {
     let text = stdout(&run(&["instructions", "--eol", "crlf"]));
     assert!(text.contains("Line endings: always CRLF"));
-    assert!(text.contains("INTACT_EOL=crlf"));
-    assert!(text.contains("INTACT_STRICT_EOL=1"));
+    assert!(text.contains("--eol crlf --strict-eol"));
     assert!(text.contains("--newlines crlf"));
 
     // Both mandates can appear together.
@@ -1303,11 +1474,94 @@ fn instructions_can_state_a_line_ending_mandate() {
     assert!(both.contains("Line endings: always LF"));
 
     let brief = stdout(&run(&["instructions", "--brief", "--eol", "crlf"]));
-    assert!(brief.contains("INTACT_EOL=crlf"));
+    assert!(brief.contains("--eol crlf --strict-eol"));
 
     // `auto` is not a mandate, so nothing is asserted.
     let plain = stdout(&run(&["instructions", "--eol", "auto"]));
-    assert!(!plain.contains("INTACT_EOL"));
+    assert!(!plain.contains("Line endings: always"));
+}
+
+/// One convention for "read this from standard input", rather than a parallel
+/// --x-stdin flag beside every path argument.
+#[test]
+fn a_dash_path_reads_standard_input() {
+    let sb = Sandbox::new("dashstdin");
+    let f = sb.file("a.txt", b"one\ntwo\n");
+    let p = f.to_str().unwrap();
+
+    let feed = |args: &[&str], input: &str| {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = Command::new(EXE)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    assert_eq!(code(&feed(&["append", p, "--text-file", "-"], "three")), 0);
+    assert_eq!(read(&f), b"one\ntwo\nthree\n".to_vec());
+
+    let out = feed(&["replace", p, "--find", "one", "--with-file", "-"], "1");
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), b"1\ntwo\nthree\n".to_vec());
+
+    // The script argument has always used this convention; it still does.
+    let out = feed(
+        &["batch", p, "--script", "-"],
+        r#"[{"op":"replace","find":"two","with":"2"}]"#,
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), b"1\n2\nthree\n".to_vec());
+}
+
+/// Options that were only a second spelling of something else. Each is now a
+/// usage error rather than a synonym an agent has to choose between.
+#[test]
+fn redundant_options_are_gone() {
+    let sb = Sandbox::new("removed");
+    let f = sb.file("a.txt", b"one\ntwo\n");
+    let p = f.to_str().unwrap();
+
+    // `create --overwrite` was exactly `write`.
+    assert_eq!(code(&run(&["create", p, "--overwrite", "--text", "x"])), 2);
+    // ... and `create` on an existing file points at `write` instead.
+    let out = run(&["create", p, "--text", "x"]);
+    assert_eq!(code(&out), 7);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("intact write"));
+
+    // --text-stdin / --with-stdin are now `--text-file -` / `--with-file -`.
+    assert_eq!(code(&run(&["append", p, "--text-stdin"])), 2);
+    assert_eq!(
+        code(&run(&["replace", p, "--find", "one", "--with-stdin"])),
+        2
+    );
+
+    // `..` was a second spelling of `:` in a range.
+    assert_eq!(code(&run(&["delete", p, "--lines", "1..2"])), 2);
+
+    // `intact encodings` is now the tail of `intact guide encoding`.
+    assert_eq!(code(&run(&["encodings"])), 2);
+    let guide = stdout(&run(&["guide", "encoding"]));
+    assert!(guide.contains("windows-1252"), "no label list");
+    assert!(guide.contains("shift_jis"), "no label list");
+
+    // The command aliases still resolve, but are no longer advertised.
+    assert_eq!(
+        code(&run(&["set-lines", p, "--lines", "1", "--text", "1"])),
+        0
+    );
+    assert!(!stdout(&run(&["--help"])).contains("set-lines"));
+    assert!(!stdout(&run(&["--help"])).contains("claude-md"));
 }
 
 /// The binary must be self-documenting: everything reachable from --help.
@@ -1327,7 +1581,6 @@ fn every_command_has_working_help() {
         "create",
         "convert",
         "batch",
-        "encodings",
         "guide",
         "instructions",
     ];
@@ -1472,4 +1725,85 @@ fn json_error_output_is_parseable() {
     let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stderr)).unwrap();
     assert_eq!(v["ok"], false);
     assert_eq!(v["kind"], "ambiguous");
+}
+
+/// Options that cannot do anything are rejected, rather than accepted and
+/// quietly ignored. Each of these used to exit 0 having done nothing, or
+/// reported a result that was an artefact of the flag rather than of the file.
+#[test]
+fn options_that_cannot_apply_are_refused() {
+    let sb = Sandbox::new("inapplicable");
+    let f = sb.file("a.txt", b"a x b\nc x d\n");
+    let p = f.to_str().unwrap();
+    let before = read(&f);
+
+    // --no-expand only means something to a regex replacement.
+    assert_eq!(
+        code(&run(&[
+            "replace",
+            p,
+            "--find",
+            "x",
+            "--with",
+            "y",
+            "--no-expand"
+        ])),
+        2
+    );
+
+    // A count of zero: --max 0 reported "no match" on a file full of matches,
+    // and --expect 0 could only ever exit 3 (nothing found) or 4 (found).
+    assert_eq!(code(&run(&["search", p, "--find", "x", "--max", "0"])), 2);
+    for flag in ["--expect", "--occurrence"] {
+        assert_eq!(
+            code(&run(&[
+                "replace", p, "--find", "x", "--with", "y", flag, "0"
+            ])),
+            2,
+            "{flag} 0 was accepted"
+        );
+    }
+
+    // Where to insert, and what to insert, are both required - and now say so
+    // before the file is opened rather than after.
+    assert_eq!(code(&run(&["insert", p, "--text", "q"])), 2);
+    assert_eq!(code(&run(&["insert", p, "--line", "1"])), 2);
+    assert_eq!(code(&run(&["append", p])), 2);
+    assert_eq!(code(&run(&["write", p])), 2);
+
+    // Only one argument can read standard input; the second used to get an
+    // empty string, turning a replacement into a deletion.
+    assert_eq!(
+        code(&run(&[
+            "replace",
+            p,
+            "--find-file",
+            "-",
+            "--with-file",
+            "-"
+        ])),
+        2
+    );
+
+    assert_eq!(read(&f), before, "a refused command wrote to the file");
+}
+
+/// Only the Unicode encodings have a byte-order mark to add.
+#[test]
+fn bom_add_needs_an_encoding_that_has_one() {
+    let sb = Sandbox::new("bom-add");
+    let f = sb.file("a.txt", "café\n".as_bytes());
+    let p = f.to_str().unwrap();
+
+    let out = run(&["convert", p, "--to", "windows-1252", "--bom", "add"]);
+    assert_eq!(code(&out), 2);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no byte-order mark"));
+    assert_eq!(read(&f), "café\n".as_bytes(), "the file was rewritten");
+
+    // ... and still works where there is one.
+    assert_eq!(
+        code(&run(&["convert", p, "--to", "utf-8", "--bom", "add"])),
+        0
+    );
+    assert!(read(&f).starts_with(&[0xEF, 0xBB, 0xBF]));
 }

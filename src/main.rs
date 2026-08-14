@@ -9,9 +9,8 @@ mod ops;
 mod report;
 mod textsrc;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use clap::Parser;
 use serde_json::{json, Map, Value};
 
 use cli::{BomMode, Cli, Command};
@@ -22,19 +21,8 @@ use lines::{Eol, EolMode, LineIndex, LineRange};
 use ops::{Ctx, OpOutcome};
 use report::Report;
 
-/// Default encoding for every invocation, overridden by --encoding.
-const ENV_ENCODING: &str = "INTACT_ENCODING";
-/// Set to 1/true/yes to refuse writing to a file whose encoding was guessed.
-const ENV_NO_GUESS: &str = "INTACT_NO_GUESS";
-/// Line endings for every invocation, overridden by --eol.
-const ENV_EOL: &str = "INTACT_EOL";
-/// Set to 1/true/yes to refuse writing to a file whose line endings differ.
-const ENV_STRICT_EOL: &str = "INTACT_STRICT_EOL";
-/// Set to 1/true/yes to print a diff of every edit, as if --show-diff.
-const ENV_SHOW_DIFF: &str = "INTACT_SHOW_DIFF";
-
 fn main() {
-    let cli = Cli::parse();
+    let cli = cli::parse();
     let json_mode = cli.json;
     match run(&cli) {
         Ok(code) => std::process::exit(code),
@@ -45,61 +33,33 @@ fn main() {
     }
 }
 
-/// `--encoding` wins; otherwise INTACT_ENCODING, so a project that mandates
-/// one encoding can set it once instead of relying on every invocation to
-/// remember the flag.
+/// Every setting comes from the command line. There is deliberately no
+/// environment fallback: an agent typically runs each command in a fresh shell,
+/// so an `export` in one invocation is gone by the next, and a setting that
+/// silently applies only sometimes is worse than no setting at all.
 fn resolve_forced_encoding(cli: &Cli) -> Result<Option<ForcedEncoding>> {
-    if let Some(label) = &cli.encoding {
-        return Ok(Some(ForcedEncoding::flag(
+    match &cli.encoding {
+        Some(label) => Ok(Some(ForcedEncoding::flag(
             encoding_util::encoding_for_label(label)?,
-        )));
-    }
-    match std::env::var(ENV_ENCODING) {
-        Ok(label) if !label.trim().is_empty() => {
-            let encoding = encoding_util::encoding_for_label(&label)
-                .map_err(|e| AppError::new(e.kind, format!("{ENV_ENCODING}: {}", e.message)))?;
-            Ok(Some(ForcedEncoding::environment(encoding)))
-        }
-        _ => Ok(None),
+        ))),
+        None => Ok(None),
     }
 }
 
-/// `--eol` wins; otherwise INTACT_EOL; otherwise match the file.
-fn resolve_eol_mode(cli: &Cli) -> Result<EolMode> {
-    if let Some(mode) = cli.eol {
-        return Ok(mode);
-    }
-    match std::env::var(ENV_EOL) {
-        Ok(value) if !value.trim().is_empty() => {
-            <EolMode as clap::ValueEnum>::from_str(value.trim(), true).map_err(|_| {
-                AppError::new(
-                    ErrorKind::Usage,
-                    format!("{ENV_EOL}: unknown line-ending mode '{value}'"),
-                )
-                .with_hint("expected one of: auto, lf, crlf, cr, keep")
-            })
-        }
-        _ => Ok(EolMode::Auto),
-    }
+/// `--eol` if given; otherwise match the file.
+fn eol_mode(cli: &Cli) -> EolMode {
+    cli.eol.unwrap_or(EolMode::Auto)
 }
 
 fn run(cli: &Cli) -> Result<i32> {
     let forced = resolve_forced_encoding(cli)?;
-    // Validate up front so a typo in the environment fails on every command,
-    // rather than only on the ones that happen to consult it.
-    resolve_eol_mode(cli)?;
 
     match &cli.command {
-        Command::Encodings => {
-            cmd_encodings(cli);
-            Ok(0)
-        }
         Command::Guide(args) => cmd_guide(cli, args),
         Command::Instructions(args) => {
             // The global --encoding and --eol double as "this project mandates
             // X"; they arrive here already validated and canonicalised.
-            let eol_mode = resolve_eol_mode(cli)?;
-            let eol = match eol_mode {
+            let eol = match eol_mode(cli) {
                 EolMode::Lf => Some("lf"),
                 EolMode::Crlf => Some("crlf"),
                 EolMode::Cr => Some("cr"),
@@ -136,25 +96,6 @@ fn run(cli: &Cli) -> Result<i32> {
 }
 
 // ---------------------------------------------------------------- read-only
-
-fn cmd_encodings(cli: &Cli) {
-    if cli.json {
-        println!(
-            "{}",
-            json!({ "ok": true, "encodings": encoding_util::KNOWN_LABELS })
-        );
-        return;
-    }
-    println!("Supported encoding labels (WHATWG names and their usual aliases):");
-    for label in encoding_util::KNOWN_LABELS {
-        println!("  {label}");
-    }
-    println!(
-        "\nAliases such as latin1, latin-1, iso-8859-1, cp1252 and ansi_x3.4-1968 are accepted.\n\
-         Note: per the WHATWG standard, latin1/iso-8859-1 resolve to windows-1252, which is a\n\
-         superset of ISO 8859-1 over the bytes 0x80-0x9F."
-    );
-}
 
 fn cmd_guide(cli: &Cli, args: &cli::GuideArgs) -> Result<i32> {
     let text = match (&args.topic, args.list) {
@@ -321,9 +262,13 @@ fn cmd_view(cli: &Cli, args: &cli::ViewArgs, forced: Option<ForcedEncoding>) -> 
 
 fn cmd_search(cli: &Cli, args: &cli::SearchArgs, forced: Option<ForcedEncoding>) -> Result<i32> {
     let doc = Document::load(&args.file, forced)?;
-    let pattern =
-        textsrc::resolve_triple(&args.find, &args.find_file, false, "--find", cli.escapes)?;
-    let ctx = ctx_for(cli, &doc)?;
+    let pattern = textsrc::resolve_pair(
+        &args.find,
+        &args.find_file,
+        "--find (or --find-file) is required",
+        cli.escapes,
+    )?;
+    let ctx = ctx_for(cli, &doc);
     let needle = if args.regex {
         pattern.clone()
     } else {
@@ -359,11 +304,11 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs, forced: Option<ForcedEncoding>)
 
 // ------------------------------------------------------------------- edits
 
-fn ctx_for(cli: &Cli, doc: &Document) -> Result<Ctx> {
-    Ok(Ctx {
-        eol_mode: resolve_eol_mode(cli)?,
+fn ctx_for(cli: &Cli, doc: &Document) -> Ctx {
+    Ctx {
+        eol_mode: eol_mode(cli),
         file_eol: doc.eol,
-    })
+    }
 }
 
 /// Guard against silently mangling something that is not a text file.
@@ -383,7 +328,7 @@ fn preflight(cli: &Cli, doc: &Document) -> Result<()> {
 
     // Under a project-wide encoding mandate, a guess is not good enough: a
     // wrong single-byte guess writes wrong bytes rather than failing.
-    if doc.detection == Detection::Guessed && (cli.no_guess || env_flag(ENV_NO_GUESS)) {
+    if doc.detection == Detection::Guessed && cli.no_guess {
         return Err(AppError::new(
             ErrorKind::Encoding,
             format!(
@@ -392,9 +337,7 @@ fn preflight(cli: &Cli, doc: &Document) -> Result<()> {
                 doc.encoding.name()
             ),
         )
-        .with_hint(format!(
-            "pass --encoding LABEL, or set {ENV_ENCODING}=LABEL for every invocation"
-        )));
+        .with_hint("pass --encoding LABEL to declare it"));
     }
     Ok(())
 }
@@ -403,11 +346,11 @@ fn preflight(cli: &Cli, doc: &Document) -> Result<()> {
 /// not the mandated ones. Without this, appending CRLF text to an LF file
 /// quietly produces a mixed-ending file.
 fn check_eol_mandate(cli: &Cli, doc: &Document) -> Result<()> {
-    if !(cli.strict_eol || env_flag(ENV_STRICT_EOL)) {
+    if !cli.strict_eol {
         return Ok(());
     }
 
-    let mode = resolve_eol_mode(cli)?;
+    let mode = eol_mode(cli);
     let want = match mode {
         EolMode::Lf => Eol::Lf,
         EolMode::Crlf => Eol::CrLf,
@@ -425,9 +368,7 @@ fn check_eol_mandate(cli: &Cli, doc: &Document) -> Result<()> {
                     }
                 ),
             )
-            .with_hint(format!(
-                "pass --eol lf|crlf|cr, or set {ENV_EOL} to one of them"
-            )))
+            .with_hint("pass --eol lf|crlf|cr"))
         }
     };
 
@@ -466,17 +407,6 @@ fn check_eol_mandate(cli: &Cli, doc: &Document) -> Result<()> {
     )))
 }
 
-fn env_flag(name: &str) -> bool {
-    matches!(
-        std::env::var(name)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
 fn cmd_edit(cli: &Cli, forced: Option<ForcedEncoding>) -> Result<i32> {
     let (path, command_name, allow_missing) = match &cli.command {
         Command::Replace(a) => (&a.file, "replace", false),
@@ -495,20 +425,34 @@ fn cmd_edit(cli: &Cli, forced: Option<ForcedEncoding>) -> Result<i32> {
         Document::load(path, forced)?
     };
     preflight(cli, &doc)?;
-    let ctx = ctx_for(cli, &doc)?;
+    let ctx = ctx_for(cli, &doc);
 
     let outcome = match &cli.command {
         Command::Replace(a) => {
-            let find =
-                textsrc::resolve_triple(&a.find, &a.find_file, false, "--find", cli.escapes)?;
+            // There is only one standard input: the first read drains it and
+            // the second silently gets an empty string, which for --with-file
+            // means deleting the match rather than replacing it.
+            let stdin = Some(Path::new("-"));
+            if a.find_file.as_deref() == stdin && a.with_file.as_deref() == stdin {
+                return Err(AppError::new(
+                    ErrorKind::Usage,
+                    "--find-file and --with-file cannot both read standard input",
+                )
+                .with_hint("pass one of them inline as --find/--with, or from a file"));
+            }
+            let find = textsrc::resolve_pair(
+                &a.find,
+                &a.find_file,
+                "--find (or --find-file) is required",
+                cli.escapes,
+            )?;
             let with = if a.delete {
                 String::new()
             } else {
-                textsrc::resolve_triple(
+                textsrc::resolve_pair(
                     &a.with,
                     &a.with_file,
-                    a.with_stdin,
-                    "--with (or --delete to remove the match)",
+                    "--with (or --with-file, or --delete to remove the match) is required",
                     cli.escapes,
                 )?
             };
@@ -544,14 +488,16 @@ fn cmd_edit(cli: &Cli, forced: Option<ForcedEncoding>) -> Result<i32> {
 
 fn cmd_create(cli: &Cli, args: &cli::CreateArgs, forced: Option<ForcedEncoding>) -> Result<i32> {
     let doc = Document::load_or_empty(&args.file, forced)?;
-    if doc.existed && !args.overwrite {
+    // Refusing outright is the whole difference between `create` and `write`;
+    // an --overwrite flag here would just be a second spelling of `write`.
+    if doc.existed {
         return Err(AppError::new(
             ErrorKind::Exists,
             format!("{} already exists", args.file.display()),
         )
-        .with_hint("pass --overwrite, or use `intact write` to replace its contents"));
+        .with_hint("use `intact write` to replace its contents"));
     }
-    let ctx = ctx_for(cli, &doc)?;
+    let ctx = ctx_for(cli, &doc);
     let text = textsrc::resolve(&args.text, "create", cli.escapes)?;
     ensure_parent_dir(&args.file, args.parents)?;
     let outcome = ops::write_all(&doc, &text, ctx, !args.no_trailing_newline)?;
@@ -587,9 +533,9 @@ fn ensure_parent_dir(file: &Path, create: bool) -> Result<()> {
 /// A diff is produced for `--dry-run` (where it is the whole point) and for
 /// `--show-diff`, which reports an edit that was actually applied. The latter
 /// is what puts the change in front of a human without a second command and a
-/// second approval, so it is worth a project-wide switch of its own.
+/// second approval.
 fn wants_diff(cli: &Cli) -> bool {
-    cli.dry_run || cli.show_diff || env_flag(ENV_SHOW_DIFF)
+    cli.dry_run || cli.show_diff
 }
 
 fn merge_details(report: &mut Report, extra: Map<String, Value>) {
@@ -721,6 +667,16 @@ fn cmd_convert(cli: &Cli, args: &cli::ConvertArgs, forced: Option<ForcedEncoding
         mode => lines::normalize_eol(&doc.text, mode.resolve(doc.eol).unwrap_or(Eol::Lf)),
     };
 
+    // Only the Unicode encodings have a byte-order mark. Silently dropping an
+    // explicit --bom add would leave the caller believing the file is marked.
+    if args.bom == BomMode::Add && BomKind::for_encoding(target).is_none() {
+        return Err(AppError::new(
+            ErrorKind::Usage,
+            format!("{} has no byte-order mark to add", target.name()),
+        )
+        .with_hint("only UTF-8 and UTF-16 have one"));
+    }
+
     let bom = match args.bom {
         BomMode::Add => BomKind::for_encoding(target),
         BomMode::Remove => None,
@@ -793,10 +749,16 @@ enum Script {
     Bare(Vec<BatchOp>),
 }
 
+/// Every variant carries an optional `file`, which is what makes one script
+/// able to edit several files. `deny_unknown_fields` still holds, so a typo in
+/// any field name fails loudly; that rules out `#[serde(flatten)]`, which serde
+/// cannot combine with it, hence the field being repeated per variant.
 #[derive(serde::Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", deny_unknown_fields)]
 enum BatchOp {
     Replace {
+        #[serde(default)]
+        file: Option<PathBuf>,
         find: String,
         #[serde(default)]
         with: String,
@@ -817,28 +779,55 @@ enum BatchOp {
     },
     Insert {
         #[serde(default)]
+        file: Option<PathBuf>,
+        #[serde(default)]
         line: Option<Value>,
         #[serde(default)]
         after: Option<Value>,
         text: String,
     },
     Append {
+        #[serde(default)]
+        file: Option<PathBuf>,
         text: String,
     },
     Prepend {
+        #[serde(default)]
+        file: Option<PathBuf>,
         text: String,
     },
     Delete {
+        #[serde(default)]
+        file: Option<PathBuf>,
         lines: Value,
     },
     #[serde(rename = "replace-lines")]
     ReplaceLines {
+        #[serde(default)]
+        file: Option<PathBuf>,
         lines: Value,
         text: String,
     },
     Write {
+        #[serde(default)]
+        file: Option<PathBuf>,
         text: String,
     },
+}
+
+impl BatchOp {
+    fn file(&self) -> Option<&Path> {
+        let file = match self {
+            BatchOp::Replace { file, .. }
+            | BatchOp::Insert { file, .. }
+            | BatchOp::Append { file, .. }
+            | BatchOp::Prepend { file, .. }
+            | BatchOp::Delete { file, .. }
+            | BatchOp::ReplaceLines { file, .. }
+            | BatchOp::Write { file, .. } => file,
+        };
+        file.as_deref()
+    }
 }
 
 fn as_range(value: &Value) -> Result<LineRange> {
@@ -890,60 +879,149 @@ fn cmd_batch(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -
         ));
     }
 
-    let original = Document::load(&args.file, forced)?;
-    preflight(cli, &original)?;
-    // Pin the encoding so that re-decoding between steps cannot drift, keeping
-    // the original source so `detected_by` still reports the truth.
-    let pinned = Some(ForcedEncoding {
-        encoding: original.encoding,
-        source: original.detection,
-    });
-
-    let mut current = original.raw.clone();
-    let mut summaries = Vec::new();
+    // One entry per file the script touches, in the order it was first named,
+    // so a later operation on the same file sees the earlier one's result.
+    let mut targets: Vec<BatchTarget> = Vec::new();
 
     for (i, op) in batch_ops.iter().enumerate() {
-        let doc = Document::from_bytes(args.file.clone(), current, pinned, true);
-        let ctx = ctx_for(cli, &doc)?;
+        let path = match (op.file(), &args.file) {
+            (Some(p), _) => p.to_path_buf(),
+            (None, Some(default)) => default.clone(),
+            (None, None) => {
+                return Err(AppError::new(
+                    ErrorKind::Usage,
+                    format!(
+                        "operation {}: no file to edit — give the op a \"file\", \
+                         or name a default file on the command line",
+                        i + 1
+                    ),
+                )
+                .with_hint("intact batch FILE --script ..., or {\"op\":...,\"file\":\"path\"}"))
+            }
+        };
+
+        let slot = match targets.iter().position(|t| t.original.path == path) {
+            Some(idx) => idx,
+            None => {
+                let original = Document::load(&path, forced)?;
+                preflight(cli, &original)?;
+                // Pin the encoding so re-decoding between steps cannot drift,
+                // keeping the original source so `detected_by` stays truthful.
+                let pinned = Some(ForcedEncoding {
+                    encoding: original.encoding,
+                    source: original.detection,
+                });
+                let current = original.raw.clone();
+                targets.push(BatchTarget {
+                    original,
+                    pinned,
+                    current,
+                    ops: 0,
+                });
+                targets.len() - 1
+            }
+        };
+
+        let target = &mut targets[slot];
+        let doc = Document::from_bytes(
+            path.clone(),
+            std::mem::take(&mut target.current),
+            target.pinned,
+            true,
+        );
+        let ctx = ctx_for(cli, &doc);
         let outcome = apply_batch_op(&doc, op, ctx).map_err(|e| AppError {
-            message: format!("operation {}: {}", i + 1, e.message),
+            message: format!("operation {} ({}): {}", i + 1, path.display(), e.message),
             ..e
         })?;
         let mut edits = outcome.edits;
-        summaries.push(outcome.summary);
-        current = doc.build_output(&mut edits, cli.unmappable, cli.lossy)?;
+        target.current = doc.build_output(&mut edits, cli.unmappable, cli.lossy)?;
+        target.ops += 1;
     }
 
-    let changed = current != original.raw;
-    let final_doc = Document::from_bytes(args.file.clone(), current.clone(), pinned, true);
+    // Nothing is written until every operation across every file has succeeded,
+    // so a failing operation leaves all of them untouched.
+    let mut file_reports = Vec::with_capacity(targets.len());
+    let mut any_changed = false;
 
-    let mut report = Report::new("batch", &original);
-    report.summary = format!("applied {} operation(s)", batch_ops.len());
-    report.changed = changed;
-    report.dry_run = cli.dry_run;
-    report.bytes_after = current.len();
-    report.lines_after = final_doc.lines().count();
-    report.details = json!({ "operations": batch_ops.len(), "steps": summaries });
+    for target in &targets {
+        let changed = target.current != target.original.raw;
+        any_changed |= changed;
+        let final_doc = Document::from_bytes(
+            target.original.path.clone(),
+            target.current.clone(),
+            target.pinned,
+            true,
+        );
 
-    // Each step re-edits the result of the last, so the spans of any one of
-    // them describe a document that no longer exists. Comparing the two ends is
-    // the only honest account of a batch.
-    if wants_diff(cli) {
-        let diff = diff::from_texts(&original.text, &final_doc.text, cli.diff_context);
-        emit_diff(cli, &mut report, &diff, true, changed);
+        let mut report = Report::new("batch", &target.original);
+        report.summary = format!("applied {} operation(s)", target.ops);
+        report.changed = changed;
+        report.dry_run = cli.dry_run;
+        report.bytes_after = target.current.len();
+        report.lines_after = final_doc.lines().count();
+        report.details = json!({ "operations": target.ops });
+
+        // Each step re-edits the result of the last, so the spans of any one of
+        // them describe a document that no longer exists. Comparing the two ends
+        // is the only honest account of a batch.
+        if wants_diff(cli) {
+            let diff = diff::from_texts(&target.original.text, &final_doc.text, cli.diff_context);
+            emit_diff(cli, &mut report, &diff, true, changed);
+        }
+        file_reports.push(report);
     }
 
-    if !cli.dry_run && changed {
-        original.save(&current, cli.backup)?;
+    if !cli.dry_run {
+        for target in &targets {
+            if target.current != target.original.raw {
+                target.original.save(&target.current, cli.backup)?;
+            }
+        }
     }
 
-    report::print_report(&report, cli.json, cli.quiet);
+    // A `files` array whatever the count: a shape that changed with the number
+    // of files would be one more thing for a caller to branch on.
+    if cli.json {
+        println!(
+            "{}",
+            json!({
+                "ok": true,
+                "command": "batch",
+                "operations": batch_ops.len(),
+                "changed": any_changed,
+                "dry_run": cli.dry_run,
+                "files": file_reports.iter().map(Report::to_file_json).collect::<Vec<_>>(),
+            })
+        );
+    } else if !cli.quiet {
+        for report in &file_reports {
+            println!("{}", report.human());
+        }
+    }
     Ok(0)
 }
 
+/// One file a batch script touches, carried across the operations that name it.
+struct BatchTarget {
+    original: Document,
+    pinned: Option<ForcedEncoding>,
+    /// The file's bytes as of the last applied operation.
+    current: Vec<u8>,
+    ops: usize,
+}
+
+/// The op's `file` has already been resolved into `doc` by the caller, so it is
+/// ignored here.
 fn apply_batch_op(doc: &Document, op: &BatchOp, ctx: Ctx) -> Result<OpOutcome> {
+    // Text in a script never goes through --escapes: JSON has its own escapes.
+    let no_text = cli::TextSource {
+        text: None,
+        text_file: None,
+    };
     match op {
         BatchOp::Replace {
+            file: _,
             find,
             with,
             regex,
@@ -960,7 +1038,6 @@ fn apply_batch_op(doc: &Document, op: &BatchOp, ctx: Ctx) -> Result<OpOutcome> {
                 find_file: None,
                 with: None,
                 with_file: None,
-                with_stdin: false,
                 delete: false,
                 regex: *regex,
                 ignore_case: *ignore_case,
@@ -972,40 +1049,44 @@ fn apply_batch_op(doc: &Document, op: &BatchOp, ctx: Ctx) -> Result<OpOutcome> {
             };
             ops::replace(doc, &args, find, with, ctx)
         }
-        BatchOp::Insert { line, after, text } => {
+        BatchOp::Insert {
+            file: _,
+            line,
+            after,
+            text,
+        } => {
             let args = cli::InsertArgs {
                 file: doc.path.clone(),
                 line: line.as_ref().map(as_spec).transpose()?,
                 after: after.as_ref().map(as_spec).transpose()?,
-                text: cli::TextSource {
-                    text: None,
-                    text_file: None,
-                    text_stdin: false,
-                },
+                text: no_text,
             };
             ops::insert(doc, &args, text, ctx)
         }
-        BatchOp::Append { text } => ops::append(doc, text, ctx, true),
-        BatchOp::Prepend { text } => ops::prepend(doc, text, ctx, true),
-        BatchOp::Delete { lines: range } => {
+        BatchOp::Append { file: _, text } => ops::append(doc, text, ctx, true),
+        BatchOp::Prepend { file: _, text } => ops::prepend(doc, text, ctx, true),
+        BatchOp::Delete {
+            file: _,
+            lines: range,
+        } => {
             let args = cli::DeleteArgs {
                 file: doc.path.clone(),
                 lines: as_range(range)?,
             };
             ops::delete(doc, &args)
         }
-        BatchOp::ReplaceLines { lines: range, text } => {
+        BatchOp::ReplaceLines {
+            file: _,
+            lines: range,
+            text,
+        } => {
             let args = cli::ReplaceLinesArgs {
                 file: doc.path.clone(),
                 lines: as_range(range)?,
-                text: cli::TextSource {
-                    text: None,
-                    text_file: None,
-                    text_stdin: false,
-                },
+                text: no_text,
             };
             ops::replace_lines(doc, &args, text, ctx)
         }
-        BatchOp::Write { text } => ops::write_all(doc, text, ctx, true),
+        BatchOp::Write { file: _, text } => ops::write_all(doc, text, ctx, true),
     }
 }
