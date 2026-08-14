@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+TODO.
+
+## [0.2.0] - 2026-08-14
+
 Making an edit visible to the person who approved it, and cutting the API down
 to what an agent actually needs: one way to do each thing, and one command that
 can make a whole changeset.
