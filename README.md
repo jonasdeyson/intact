@@ -225,6 +225,11 @@ intact insert main.rs --line 1 --escapes --text 'use std::fmt;\nuse std::io;'
 
 Supported escapes: `\n \r \t \0 \\ \' \" \xNN \uXXXX \u{XXXXX}`.
 
+`--escapes` applies to the text whatever it came from, so `--text-file`,
+`--find-file` and `--with-file` content is unescaped too — worth remembering
+before pointing it at a block full of Windows paths. Text in a `batch` script is
+never touched by it: JSON has escapes of its own.
+
 #### `batch` — several edits, and the only multi-file mode
 
 Operations are applied in order; if any of them fails, **nothing is written** —
@@ -383,6 +388,11 @@ With `--dry-run` or `--show-diff` a `"diff"` field carries the complete unified
 diff — never truncated, unlike the human output — plus `"eol_before"` and
 `"eol_after"` when the line-ending styles change.
 
+Two fields appear only when there is something to report, so their presence is
+itself the signal: `"resolved_path"` when the path given is a symlink, and
+`"warnings"` when something about the file deserves saying without blocking the
+write.
+
 ## Encodings
 
 Labels follow the [WHATWG Encoding Standard](https://encoding.spec.whatwg.org/):
@@ -488,6 +498,35 @@ notes.txt: updated (windows-1252, lf) - replaced 1 of 1 occurrence(s)
 `intact info` always reports whether the encoding was declared by a BOM,
 proven by valid UTF-8, or merely guessed. When a project's encoding is known,
 passing `--encoding` removes the guesswork entirely.
+
+### Mojibake already in the file
+
+Text that has been through the wrong encoding leaves a recognisable shape — `Ã©`
+where `é` was meant, `â€™` where a right single quote was. `intact info` reports
+it as a `warning:` line, and every command that writes prints the same warning on
+stderr before its result:
+
+```console
+$ intact replace notes.txt --find addition --with note
+intact: warning: notes.txt: 2 mojibake-shaped sequence(s), first "Ã©" at line 1:
+text that was written through the wrong encoding at some point. Report it rather
+than editing the damaged text by hand. This file's encoding was inferred
+(utf-8-valid), not declared - confirm it with --encoding LABEL before writing.
+notes.txt: updated (UTF-8, lf) - replaced 1 of 1 occurrence(s)
+```
+
+It is an advisory, not a guard: the edit goes through, and `--quiet` does not
+silence it. Under `--json` it is a `mojibake` object on an `info` result
+(`count`, `line`, `sample`) and a `warnings` array on an edit result.
+
+The check reports damage, not misdetection. It catches text that was written
+through the wrong encoding at some point — including UTF-8 that was
+double-encoded — but not a file whose encoding `intact` read wrong: a
+windows-1252 file whose bytes are valid UTF-8 decodes to *clean* text, and only
+`--encoding` settles that case. Don't hand-fix the characters either. Rewriting
+one `Ã©` as `é` repairs a single occurrence and leaves the rest of the file as it
+was; the repair is to re-encode the whole file from the encoding it was mangled
+through.
 
 ## Development
 

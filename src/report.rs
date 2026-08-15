@@ -23,6 +23,10 @@ pub struct Report {
     pub lines_after: usize,
     pub summary: String,
     pub details: Value,
+    /// Advisories that do not block the write. Collected here rather than at
+    /// each call site because `Report::new` is the one point every write path
+    /// (`finish`, `convert`, `batch`) passes through.
+    pub warnings: Vec<String>,
 }
 
 impl Report {
@@ -43,6 +47,7 @@ impl Report {
             lines_after: doc.lines().count(),
             summary: String::new(),
             details: Value::Null,
+            warnings: doc.mojibake_warning().into_iter().collect(),
         }
     }
 
@@ -80,6 +85,11 @@ impl Report {
         obj.insert("lines_before".into(), json!(self.lines_before));
         obj.insert("lines_after".into(), json!(self.lines_after));
         obj.insert("summary".into(), json!(self.summary));
+        // Absent rather than empty, so its presence is the signal - as with
+        // `resolved_path` above.
+        if !self.warnings.is_empty() {
+            obj.insert("warnings".into(), json!(self.warnings));
+        }
         if let Value::Object(details) = &self.details {
             for (k, v) in details {
                 obj.insert(k.clone(), v.clone());
@@ -117,8 +127,15 @@ pub fn print_report(report: &Report, json_mode: bool, quiet: bool) {
             "{}",
             serde_json::to_string(&report.to_json()).unwrap_or_default()
         );
-    } else if !quiet {
-        println!("{}", report.human());
+    } else {
+        // Warnings go to stderr and ignore --quiet: --quiet suppresses the
+        // routine success line, not a caution about the file's encoding.
+        for warning in &report.warnings {
+            eprintln!("intact: warning: {}: {warning}", report.path);
+        }
+        if !quiet {
+            println!("{}", report.human());
+        }
     }
 }
 

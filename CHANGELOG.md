@@ -7,12 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Mojibake-shaped text is reported rather than silently edited around. `info`
+  prints a `warning:` line for it and carries a `mojibake` object (`count`,
+  `line`, `sample`) under `--json`; every command that writes prints the same
+  warning on stderr before its result, and carries a `warnings` array under
+  `--json`. It is an advisory, not a guard — the edit goes through, and
+  `--quiet` does not silence it. When the encoding was inferred rather than
+  declared the warning says so, because a wrong reading and real damage look
+  alike. `intact guide encoding` explains what the shape can and cannot catch.
+
 ### Changed
 
 - `similar` 2.7 to 3.1, and `chardetng` 0.1.17 to 1.0.
 - The minimum supported Rust version is 1.85, raised from 1.74 by `similar` 3,
   which is a Rust 2024 edition crate.
 - `intact` is built on the Rust 2024 edition, up from 2021.
+- `--escapes` documents that it applies to text read with `--text-file`,
+  `--find-file` and `--with-file` as well as to the inline arguments, which it
+  always did.
+
+### Fixed
+
+- `intact append --help` and `intact write --help` still showed `--text-stdin`,
+  removed in 0.2.0; the examples now use `--text-file -`.
+- `intact write --help` listed `--strict-eol`, which `write` is exempt from —
+  it replaces the whole content, so there are no existing line endings to
+  enforce. `create` already omitted it.
 
 ## [0.2.0] - 2026-08-14
 

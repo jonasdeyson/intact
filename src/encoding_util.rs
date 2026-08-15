@@ -287,6 +287,84 @@ pub fn detect_legacy(bytes: &[u8]) -> &'static Encoding {
     detector.guess(None, chardetng::Utf8Detection::Allow)
 }
 
+/// A run of text shaped like mojibake: UTF-8 bytes read through a single-byte
+/// encoding, so `é` (C3 A9) reads as `Ã©` and `'` (E2 80 99) as `â€™`.
+#[derive(Debug, Clone)]
+pub struct MojibakeHint {
+    /// How many such sequences the text contains.
+    pub count: usize,
+    /// Byte offset of the first one within the decoded text.
+    pub offset: usize,
+    /// The first sequence itself, for quoting back at the user.
+    pub sample: String,
+}
+
+/// The characters windows-1252 stores in 0x80..=0x9F. Together with
+/// U+00A0..=U+00BF, which it stores as themselves, these are exactly the
+/// characters that a UTF-8 continuation byte decodes to.
+const CP1252_HIGH: [char; 32] = [
+    '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}', '\u{017D}', '\u{008F}',
+    '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+];
+
+/// Whether `ch` is one a UTF-8 continuation byte (0x80..=0xBF) decodes to.
+fn is_continuation_shaped(ch: char) -> bool {
+    matches!(ch, '\u{00A0}'..='\u{00BF}') || CP1252_HIGH.contains(&ch)
+}
+
+/// Find mojibake-shaped sequences in decoded text.
+///
+/// Only the three lead characters that dominate real mojibake are considered,
+/// and each must be followed by a continuation-shaped character. That pairing
+/// is what keeps the check quiet on genuine text: `Ã` and `Â` occur in
+/// Portuguese and French before ASCII letters, never before U+00A0..=U+00BF,
+/// and `â` is only counted before `€` - the `â€™`/`â€œ` family - so `château`
+/// does not register.
+pub fn scan_mojibake(text: &str) -> Option<MojibakeHint> {
+    let mut count = 0usize;
+    let mut first: Option<(usize, usize)> = None;
+
+    for (idx, ch) in text.char_indices() {
+        if !matches!(ch, 'Ã' | 'Â' | 'â') {
+            continue;
+        }
+        // Walking forward from the lead keeps the look-ahead honest: `chars`
+        // starts at the character after it, so `next` and `third` are distinct.
+        let mut chars = text[idx + ch.len_utf8()..].chars();
+        let Some(next) = chars.next() else { continue };
+        let matched = match ch {
+            'Ã' | 'Â' => is_continuation_shaped(next),
+            'â' => next == '\u{20AC}',
+            _ => false,
+        };
+        if !matched {
+            continue;
+        }
+        count += 1;
+        if first.is_none() {
+            // Take the trailing character and the one after it when it is also
+            // continuation-shaped, so the sample reads as the whole garbled
+            // cluster (`â€™`, not `â€`). Three characters is the longest a
+            // single mis-decoded scalar produces.
+            let mut end = idx + ch.len_utf8() + next.len_utf8();
+            if let Some(third) = chars.next() {
+                if is_continuation_shaped(third) {
+                    end += third.len_utf8();
+                }
+            }
+            first = Some((idx, end));
+        }
+    }
+
+    first.map(|(start, end)| MojibakeHint {
+        count,
+        offset: start,
+        sample: text[start..end].to_string(),
+    })
+}
+
 /// Labels advertised by `intact guide encoding`.
 pub const KNOWN_LABELS: &[&str] = &[
     "utf-8",

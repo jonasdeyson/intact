@@ -163,6 +163,17 @@ fn cmd_info(cli: &Cli, path: &Path, forced: Option<ForcedEncoding>) -> Result<i3
     if let (Some(resolved), Some(obj)) = (&resolved, value.as_object_mut()) {
         obj.insert("resolved_path".into(), json!(resolved));
     }
+    let mojibake = doc.mojibake();
+    if let (Some(hint), Some(obj)) = (&mojibake, value.as_object_mut()) {
+        obj.insert(
+            "mojibake".into(),
+            json!({
+                "count": hint.count,
+                "line": doc.lines().line_of_offset(hint.offset),
+                "sample": hint.sample,
+            }),
+        );
+    }
 
     if cli.json {
         println!("{value}");
@@ -208,8 +219,33 @@ fn cmd_info(cli: &Cli, path: &Path, forced: Option<ForcedEncoding>) -> Result<i3
         if doc.looks_binary() {
             println!("warning:         file contains NUL bytes and may not be text");
         }
+        if let Some(warning) = doc.mojibake_warning() {
+            println!("warning:         {}", wrap_indented(&warning, 78, 17));
+        }
     }
     Ok(0)
+}
+
+/// Wrap `text` to `width` columns, indenting every line after the first by
+/// `indent` spaces so it lines up under a label the caller already printed.
+fn wrap_indented(text: &str, width: usize, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    let mut out = String::new();
+    let mut col = indent;
+    for word in text.split_whitespace() {
+        let len = word.chars().count();
+        if col > indent && col + 1 + len > width {
+            out.push('\n');
+            out.push_str(&pad);
+            col = indent;
+        } else if col > indent {
+            out.push(' ');
+            col += 1;
+        }
+        out.push_str(word);
+        col += len;
+    }
+    out
 }
 
 fn cmd_view(cli: &Cli, args: &cli::ViewArgs, forced: Option<ForcedEncoding>) -> Result<i32> {
@@ -994,9 +1030,18 @@ fn cmd_batch(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -
                 "files": file_reports.iter().map(Report::to_file_json).collect::<Vec<_>>(),
             })
         );
-    } else if !cli.quiet {
+    } else {
+        // `to_file_json` carries the warnings in JSON mode; this is the human
+        // equivalent, on stderr and not gated by --quiet like print_report.
         for report in &file_reports {
-            println!("{}", report.human());
+            for warning in &report.warnings {
+                eprintln!("intact: warning: {}: {warning}", report.path);
+            }
+        }
+        if !cli.quiet {
+            for report in &file_reports {
+                println!("{}", report.human());
+            }
         }
     }
     Ok(0)
