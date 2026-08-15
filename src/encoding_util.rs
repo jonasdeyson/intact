@@ -100,7 +100,7 @@ pub fn encoding_for_label(label: &str) -> Result<&'static Encoding> {
         ErrorKind::Usage,
         format!("unknown encoding label '{label}'"),
     )
-    .with_hint("run `intact encodings` to list supported labels"))
+    .with_hint("run `intact guide encoding` to list supported labels"))
 }
 
 /// Encodings whose encoder carries state across characters. Splicing individual
@@ -287,7 +287,7 @@ pub fn detect_legacy(bytes: &[u8]) -> &'static Encoding {
     detector.guess(None, chardetng::Utf8Detection::Allow)
 }
 
-/// Labels advertised by `intact encodings`.
+/// Labels advertised by `intact guide encoding`.
 pub const KNOWN_LABELS: &[&str] = &[
     "utf-8",
     "utf-16le",
