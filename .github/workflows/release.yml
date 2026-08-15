@@ -55,6 +55,10 @@ jobs:
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
 
+      - name: Verify packaging
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo publish --dry-run --locked
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: tar czf intact-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release intact
