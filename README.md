@@ -1,36 +1,47 @@
 # intact
 
+[![CI](https://github.com/jonasdeyson/intact/actions/workflows/ci.yml/badge.svg)](https://github.com/jonasdeyson/intact/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/intact.svg)](https://crates.io/crates/intact)
+[![MSRV](https://img.shields.io/badge/rust-1.85%2B-blue.svg)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An encoding-preserving command-line text editor.
 
-Some AI agents decode files to UTF-8 internally, so writing them back naively
-re-encodes everything as UTF-8 and turns a Latin-1 `café` into `cafÃ©`.
-`intact` takes UTF-8 text on the command line, transcodes it into whatever
-encoding the target file already uses, and splices it in without touching any other byte.
+## Summary
 
-```console
-$ intact info cfg.ini
-path:            cfg.ini
-bytes:           137
-encoding:        windows-1252 (detected by: guessed)
-...
-edit safety:     byte-exact (edits keep every untouched byte)
+It is a known issue that some AI agents corrupt files containing accented characters
+(á, à, ã, ú, ç, etc.) when editing them.
+This seems to happen especially when the files use an encoding other than UTF-8, and can affect characters far from the sections being edited.
 
-$ intact replace cfg.ini --find 'pequenas empresas' --with 'organizações públicas'
-cfg.ini: updated (windows-1252, lf) - replaced 1 of 1 occurrence(s)
-```
-
-The replacement went in as `6f7267616e697a61e7f56573 20 fa62...` — `ç` as the
-single byte `0xE7`, `õ` as `0xF5`, `ú` as `0xFA`. The file is still
-windows-1252, and every byte outside the replaced span is untouched.
+`intact` is a command-line text editor that prevents character corruption by preserving encodings and EOL sequences, and by not touching bytes outside the edited segments.
+This makes it a reliable text editing tool for AI agents prone to text corruption problems.
 
 ## Install
 
+### Precompiled binaries
+
+Precompiled binaries for Linux, macOS and Windows are available for each 
+[release](https://github.com/jonasdeyson/intact/releases) — unpack the archive
+for your platform and put the `intact` executable on `PATH`; no Rust toolchain
+needed.
+
+### crates.io
+
+You can install from [crates.io](https://crates.io/crates/intact) (requires Rust toolchain):
+
 ```console
-cargo build --release
-install -m755 target/release/intact ~/.local/bin/
+cargo install intact
 ```
 
-## The binary documents itself
+### From source
+
+Install directly from the source root (requires Rust toolchain):
+
+```console
+cargo install --path .
+```
+
+## Self-contained documentation
 
 You can hand an agent nothing but the executable. Everything below is reachable
 from `--help`:
@@ -55,7 +66,7 @@ no configuration file — an agent typically runs each command in a fresh shell,
 so an `export` from one invocation would not survive to the next, and a setting
 that applies only sometimes is worse than one that never applies.
 
-### Telling another project's agent about it
+### Teaching an agent how to use it
 
 `intact instructions` prints a Markdown section to paste into another
 project's `CLAUDE.md` / `AGENTS.md`:
@@ -75,16 +86,7 @@ rules for anchoring edits and reading exit codes. Options:
 | `--command NAME` | how the binary is invoked there (e.g. an absolute path) |
 | `--legacy-only` | narrow the mandate to non-UTF-8 files only |
 | `--heading-level N` | heading depth, 1–4 (default 2) |
-| `--wsl [DISTRO]` | the agent is on Windows and the binary is in WSL |
-
-`--wsl` is for the split setup: `intact` built inside WSL as a Linux binary,
-while the agent editing the project runs on Windows and types into PowerShell,
-cmd or Git Bash. Running `intact` there fails — the ELF binary is not
-executable by Windows. The generated section opens with the rule that every
-command goes through `wsl.exe` (`--wsl Ubuntu-24.04` pins the distribution),
-and covers the two follow-on traps: paths are WSL paths, so `C:\src\app.py` is
-a junk relative filename on the other side, and quoting is the Windows shell's
-job. The command list itself stays unprefixed and readable.
+| `--wsl [DISTRO]` | can be used when the agent is on Windows and `intact` is a Linux binary in WSL |
 
 ## The guarantees
 
@@ -131,7 +133,7 @@ With `--json`, failures print a parseable object on **stderr**:
 
 ## Commands
 
-### Inspect
+### Inspection
 
 ```console
 intact info FILE                    # encoding, BOM, line endings, edit safety
@@ -147,7 +149,7 @@ intact instructions                 # a CLAUDE.md section for another project
 `search` exits 3 when nothing matched (use `--allow-empty` for exit 0). Human
 output is `path:line:column:line-text`.
 
-### Edit
+### Editing
 
 ```console
 intact replace FILE --find TEXT --with TEXT
@@ -234,6 +236,11 @@ intact insert main.rs --line 1 --escapes --text 'use std::fmt;\nuse std::io;'
 
 Supported escapes: `\n \r \t \0 \\ \' \" \xNN \uXXXX \u{XXXXX}`.
 
+`--escapes` applies to the text whatever it came from, so `--text-file`,
+`--find-file` and `--with-file` content is unescaped too — worth remembering
+before pointing it at a block full of Windows paths. Text in a `batch` script is
+never touched by it: JSON has escapes of its own.
+
 #### `batch` — several edits, and the only multi-file mode
 
 Operations are applied in order; if any of them fails, **nothing is written** —
@@ -275,8 +282,8 @@ CHANGELOG.md: updated (UTF-8, lf) - applied 1 operation(s)
 
 Each file is decoded, checked and written back in its own encoding, which is
 why every other command takes exactly one file. Reporting is one summary line
-per file; under `--json`, a `files` array with one object per file — always an
-array, whether the script touched one file or twenty.
+per file; under `--json`, it's a `files` array with one object per file —
+always an array, whether the script touched one file or twenty.
 
 Every operation runs against an in-memory copy and nothing reaches disk until
 all of them have succeeded. The writes are then one atomic rename per file;
@@ -297,6 +304,7 @@ partway through that last step can leave earlier files written. A failing
 | `--no-guess` | refuse to *write* to a file whose encoding was only guessed |
 | `--unmappable POLICY` | `error` (default), `replace` (`?`), `xml` (`&#NNN;`), `skip` |
 | `--eol MODE` | `auto` (default), `lf`, `crlf`, `cr`, `keep` |
+| `--strict-eol` | refuse to write when the file's existing line endings don't match `--eol` |
 | `--escapes` | interpret backslash escapes in supplied text |
 | `--lossy` | permit rewriting a file that does not round-trip |
 | `--force` | edit a file that contains NUL bytes |
@@ -390,6 +398,11 @@ did rather than what comparing two versions of the file suggests it did:
 With `--dry-run` or `--show-diff` a `"diff"` field carries the complete unified
 diff — never truncated, unlike the human output — plus `"eol_before"` and
 `"eol_after"` when the line-ending styles change.
+
+Two fields appear only when there is something to report, so their presence is
+itself the signal: `"resolved_path"` when the path given is a symlink, and
+`"warnings"` when something about the file deserves saying without blocking the
+write.
 
 ## Encodings
 
@@ -497,12 +510,47 @@ notes.txt: updated (windows-1252, lf) - replaced 1 of 1 occurrence(s)
 proven by valid UTF-8, or merely guessed. When a project's encoding is known,
 passing `--encoding` removes the guesswork entirely.
 
+### Mojibake already in the file
+
+Text that has been through the wrong encoding leaves a recognisable shape — `Ã©`
+where `é` was meant, `â€™` where a right single quote was. `intact info` reports
+it as a `warning:` line, and every command that writes prints the same warning on
+stderr before its result:
+
+```console
+$ intact replace notes.txt --find addition --with note
+intact: warning: notes.txt: 2 mojibake-shaped sequence(s), first "Ã©" at line 1:
+text that was written through the wrong encoding at some point. Report it rather
+than editing the damaged text by hand. This file's encoding was inferred
+(utf-8-valid), not declared - confirm it with --encoding LABEL before writing.
+notes.txt: updated (UTF-8, lf) - replaced 1 of 1 occurrence(s)
+```
+
+It is an advisory, not a guard: the edit goes through, and `--quiet` does not
+silence it. Under `--json` it is a `mojibake` object on an `info` result
+(`count`, `line`, `sample`) and a `warnings` array on an edit result.
+
+The check reports damage, not misdetection. It catches text that was written
+through the wrong encoding at some point — including UTF-8 that was
+double-encoded — but not a file whose encoding `intact` read wrong: a
+windows-1252 file whose bytes are valid UTF-8 decodes to *clean* text, and only
+`--encoding` settles that case. Don't hand-fix the characters either. Rewriting
+one `Ã©` as `é` repairs a single occurrence and leaves the rest of the file as it
+was; the repair is to re-encode the whole file from the encoding it was mangled
+through.
+
 ## Development
 
 ```console
-cargo test        # 31 unit + 67 end-to-end tests
+cargo test        # unit + end-to-end tests
 cargo clippy --all-targets
+cargo fmt --check
 ```
+
+CI runs those three on every push and pull request — the test suite on Linux,
+macOS and Windows, plus a `cargo check` against the minimum supported Rust
+version (1.85, the edition 2024 floor). The workflow is
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 The manual lives in [`src/manual.rs`](src/manual.rs), not in this README — the
 binary is the source of truth, and tests assert that every command appears in

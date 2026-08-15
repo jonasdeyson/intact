@@ -2,7 +2,7 @@
 //! details for the result report; nothing here touches the filesystem.
 
 use regex::{Regex, RegexBuilder};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cli::{DeleteArgs, InsertArgs, ReplaceArgs, ReplaceLinesArgs, SearchArgs};
 use crate::document::{Document, Edit};
@@ -267,13 +267,13 @@ pub fn insert(doc: &Document, args: &InsertArgs, text: &str, ctx: Ctx) -> Result
             return Err(AppError::new(
                 ErrorKind::Usage,
                 "insert requires --line N or --after N",
-            ))
+            ));
         }
         (Some(_), Some(_)) => {
             return Err(AppError::new(
                 ErrorKind::Usage,
                 "--line and --after are mutually exclusive",
-            ))
+            ));
         }
     };
 

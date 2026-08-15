@@ -30,11 +30,7 @@ pub fn resolve_pair(
     } else {
         return Err(AppError::new(ErrorKind::Usage, what.to_string()));
     };
-    if escapes {
-        unescape(&raw)
-    } else {
-        Ok(raw)
-    }
+    if escapes { unescape(&raw) } else { Ok(raw) }
 }
 
 /// Read a UTF-8 file, or standard input when the path is `-`.
@@ -88,7 +84,7 @@ pub fn unescape(s: &str) -> Result<String> {
                 return Err(AppError::new(
                     ErrorKind::Usage,
                     "text ends with a lone backslash",
-                ))
+                ));
             }
             Some('n') => out.push('\n'),
             Some('r') => out.push('\r'),
@@ -138,7 +134,7 @@ pub fn unescape(s: &str) -> Result<String> {
                 return Err(AppError::new(
                     ErrorKind::Usage,
                     format!("unknown escape sequence \\{other}"),
-                ))
+                ));
             }
         }
     }

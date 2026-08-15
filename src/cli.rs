@@ -31,8 +31,8 @@ TEXT INPUT:
   Every command that takes text accepts --text/-t or --text-file PATH
   (`--text-file -` reads standard input). Text supplied to intact is always
   UTF-8; it is transcoded into the file's own encoding on write. --escapes
-  interprets \\n, \\t, \\uXXXX in --text, --find and --with, so multi-line
-  content fits in one argument.
+  interprets \\n, \\t, \\uXXXX in --text, --find and --with - and in text read
+  from a file - so multi-line content fits in one argument.
 
 LINE RANGES (--lines, --line, --after), 1-based and inclusive:
   7  5:9  5:  :9  $  3:$  -1  -3:-1
@@ -106,7 +106,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub strict_eol: bool,
 
-    /// Interpret backslash escapes (\n, \t, \r, \0, \\, \xNN, \uXXXX) in --text, --find and --with
+    /// Interpret backslash escapes (\n, \t, \r, \0, \\, \xNN, \uXXXX) in supplied text, whether it
+    /// came from --text/--find/--with or from their --text-file/--find-file/--with-file forms
     #[arg(long, global = true)]
     pub escapes: bool,
 
@@ -192,7 +193,9 @@ const GLOBALS_BY_COMMAND: &[(&str, &[&[&str]])] = &[
     ("append",        &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
     ("prepend",       &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
     ("replace-lines", &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
-    ("write",         &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
+    // Replaces the whole content, so --strict-eol has nothing to enforce: the
+    // output is compliant whatever the file held before. Same as `create`.
+    ("write",         &[FILE, WRITE, BACKUP, GUARD, ENCODE, EOL, ESCAPES]),
     // Deletes nothing but whole lines: no new text is encoded, and there is no
     // --text to unescape. --strict-eol still guards the write.
     ("delete",        &[FILE, WRITE, BACKUP, GUARD, MANDATE]),
@@ -328,7 +331,7 @@ pub enum Command {
                       first, so the appended text always starts on its own line.",
         after_help = "EXAMPLES:\n  \
                       intact append CHANGELOG.md --text '- fixed the thing'\n  \
-                      cat block.txt | intact append notes.txt --text-stdin\n"
+                      cat block.txt | intact append notes.txt --text-file -\n"
     )]
     Append(TextOnlyArgs),
 
@@ -372,7 +375,7 @@ pub enum Command {
                       Use `create` instead when overwriting an existing file would be a bug.",
         after_help = "EXAMPLES:\n  \
                       intact write notes.txt --text-file /tmp/new.txt\n  \
-                      intact write notes.txt --text-stdin < /tmp/new.txt\n"
+                      intact write notes.txt --text-file - < /tmp/new-2.txt\n"
     )]
     Write(WriteArgs),
 

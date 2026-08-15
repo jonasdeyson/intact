@@ -14,10 +14,11 @@ use std::path::{Path, PathBuf};
 use encoding_rs::{Encoding, UTF_8};
 
 use crate::encoding_util::{
-    build_encoded_map, encode_text, is_stateful, sniff_bom, BomKind, EncodedMap, UnmappablePolicy,
+    BomKind, EncodedMap, MojibakeHint, UnmappablePolicy, build_encoded_map, encode_text,
+    is_stateful, scan_mojibake, sniff_bom,
 };
 use crate::error::{AppError, ErrorKind, Result};
-use crate::lines::{detect_eol, Eol, LineIndex};
+use crate::lines::{Eol, LineIndex, detect_eol};
 
 /// How the file's encoding was determined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +111,7 @@ impl Document {
                     ErrorKind::NotFound,
                     format!("no such file: {}", path.display()),
                 )
-                .with_hint("use `intact create` to make a new file"))
+                .with_hint("use `intact create` to make a new file"));
             }
             Err(e) => return Err(AppError::from(e)),
         };
@@ -232,6 +233,53 @@ impl Document {
             return false;
         }
         self.raw.contains(&0)
+    }
+
+    /// Mojibake-shaped sequences in the decoded text, if any. Computed on
+    /// demand: only `info` and the write path ask, so the read-only commands
+    /// should not pay for another pass over the text.
+    pub fn mojibake(&self) -> Option<MojibakeHint> {
+        scan_mojibake(&self.text)
+    }
+
+    /// A warning about mojibake-shaped text in the file as decoded.
+    ///
+    /// This reports damage, not misdetection, and the difference matters. A
+    /// windows-1252 file whose bytes happen to be valid UTF-8 is detected as
+    /// UTF-8 and decodes to *clean* text — the mojibake shape sits in the
+    /// windows-1252 reading, the one thrown away — and an ordinary UTF-8 file
+    /// holding the same accented words has byte-for-byte identical content.
+    /// Nothing in the bytes tells those two apart, so no warning here can;
+    /// only --encoding settles it.
+    ///
+    /// What the shape does reliably catch is text that already went through the
+    /// wrong encoding: UTF-8 that was double-encoded (`Ã©` for `é`), and a
+    /// legacy file read under a correct explicit --encoding whose content was
+    /// damaged before `intact` ever saw it. Both are the "do not hand-fix
+    /// mojibake" condition, and neither was visible before.
+    pub fn mojibake_warning(&self) -> Option<String> {
+        let hint = self.mojibake()?;
+        // No path: `info` prints one above already, and the write path prefixes
+        // its own so a `batch` over several files stays attributable.
+        let mut msg = format!(
+            "{} mojibake-shaped sequence(s), first {:?} at line {}: text that was written \
+             through the wrong encoding at some point. Report it rather than editing the \
+             damaged text by hand.",
+            hint.count,
+            hint.sample,
+            self.line_index.line_of_offset(hint.offset),
+        );
+        // A declared encoding makes the damage unambiguously pre-existing. An
+        // inferred one leaves open that the reading itself is off, which would
+        // change what the text actually says.
+        if !matches!(self.detection, Detection::Explicit | Detection::Bom) {
+            msg.push_str(&format!(
+                " This file's encoding was inferred ({}), not declared - confirm it with \
+                 --encoding LABEL before writing.",
+                self.detection.as_str()
+            ));
+        }
+        Some(msg)
     }
 
     /// Apply edits to the decoded text (used for previews and for computing the

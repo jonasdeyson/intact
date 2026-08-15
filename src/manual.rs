@@ -200,6 +200,50 @@ DETECTION ORDER
 `intact info FILE` reports which of these applied, as `detected_by`:
 explicit, bom, utf-8-valid, guessed, or default (empty/new file).
 
+Step 3 is a validity check, not a verification. Every single-byte encoding
+decodes every byte sequence, so bytes that are valid UTF-8 may equally be a
+windows-1252 file whose own content is already mojibake: `Ã©` in windows-1252 is
+the bytes C3 A9, which are also a perfectly good UTF-8 `é`. Such a file is
+detected as UTF-8 and edited as UTF-8, and the text you insert is then wrong for
+every reader that opens it as windows-1252.
+
+Nothing detects this, and no future version will. A UTF-8 file containing `café`
+and a windows-1252 file containing `cafÃ©` are the same 5 bytes; the difference
+is intent, which is not in the file. Only --encoding settles it. This is the one
+case where the guess is silently wrong rather than loudly wrong, and it is why a
+project with a known encoding should declare it on every command.
+
+Note the limit of that risk: a windows-1252 file with ordinary text is not
+affected. Real `café` is 63 61 66 E9, which is not valid UTF-8, so it reaches
+chardetng at step 4 as intended. Only a file whose windows-1252 content is
+*itself* mojibake reaches step 3 by accident — a file that was already damaged
+before `intact` saw it.
+
+MOJIBAKE ALREADY IN THE FILE
+
+Text that has been through the wrong encoding leaves a recognisable shape: `Ã©`
+where `é` was meant, `â€™` where a right single quote was. `intact info` reports
+it as a warning line, and every command that writes prints the same warning on
+stderr before its result:
+
+  intact: warning: app.py: 2 mojibake-shaped sequence(s), first \"Ã©\" at
+  line 1: text that was written through the wrong encoding at some point.
+
+This is an advisory, not a guard: the edit goes through, and --quiet does not
+silence it. Under --json it is a `mojibake` object on an `info` result and a
+`warnings` array on an edit result — see `intact guide json`.
+
+It reports damage, not misdetection, and cannot report the detection case above:
+a windows-1252 file whose bytes are valid UTF-8 decodes to clean text, so there
+is no shape to see. When the encoding was inferred rather than declared the
+warning says so and asks for --encoding LABEL, because a wrong reading and real
+damage look alike from here.
+
+Do not hand-fix the characters. Rewriting one `Ã©` as `é` repairs a single
+occurrence and leaves the rest of the file as it was; the repair is to re-encode
+the whole file from the encoding it was mangled through, which is a decision for
+whoever owns the file.
+
 PROJECTS THAT MANDATE ONE ENCODING
 
 If every file in a project must be, say, Latin-1, do not rely on detection at
@@ -212,6 +256,11 @@ all. Pass both flags on every command that writes:
 --no-guess makes any *write* to a file whose encoding was merely guessed fail
 with exit 5 instead of proceeding. Read-only commands (info, view, search) still
 work, so a file that trips the guard can still be diagnosed.
+
+Note its scope: --no-guess covers `detected_by: guessed`, the chardetng path. It
+does not fire on `utf-8-valid`, which is an inference too but not a statistical
+one. Only --encoding covers that case, which is why the two flags go together
+rather than either standing in for the other.
 
 That pairing matters more than it looks. A wrong single-byte guess does not
 merely display the file oddly: existing bytes survive, but text you insert is
@@ -326,6 +375,12 @@ the easiest way to pass multi-line content in a single argument:
 
 Supported: \\n \\r \\t \\0 \\\\ \\' \\\" \\xNN \\uXXXX \\u{XXXXX}
 
+It applies to the text whatever it came from, so --text-file, --find-file and
+--with-file content is unescaped too. That is worth knowing before combining
+--escapes with a file: a block holding a Windows path or a regex has its
+backslashes interpreted like any other. Text in a `batch` script is the
+exception - JSON has escapes of its own and --escapes never touches it.
+
 Without --escapes, a literal backslash in your text is just a backslash, which
 is what you want when editing code containing regex or Windows paths.
 
@@ -406,8 +461,10 @@ half-edited state, and batch is all-or-nothing across all of its operations.",
         title: "JSON OUTPUT",
         summary: "machine-readable results and errors",
         body: "\
---json makes every command emit one JSON object. Successful results go to
-stdout, failures to stderr, and the process exit code is unchanged.
+--json makes every command that reports a result emit one JSON object.
+Successful results go to stdout, failures to stderr, and the process exit code
+is unchanged. (`instructions` is the exception: it prints Markdown for a
+CLAUDE.md whatever else is passed.)
 
 SUCCESS (edits)
 
@@ -440,6 +497,13 @@ A \"resolved_path\" field appears (in edit and info results alike) only when
 the path given is a symlink, and holds the file actually read and written.
 Its absence means the path is the file.
 
+A \"warnings\" array appears, on the same terms, when something about the file
+deserves saying without blocking the write — today, mojibake-shaped text in it.
+Its absence means there was nothing to say. Outside --json the same warnings go
+to stderr, and --quiet does not suppress them.
+
+  \"warnings\":[\"2 mojibake-shaped sequence(s), first \\\"Ã©\\\" at line 1: ...\"]
+
 SUCCESS (batch)
 
 batch reports per file, so its result carries a \"files\" array instead of the
@@ -454,16 +518,22 @@ single-file fields above. The array is always present, whatever the count.
 
 SUCCESS (search)
 
-  {\"ok\":true,\"command\":\"search\",\"count\":2,\"matches\":[
+  {\"ok\":true,\"command\":\"search\",\"path\":\"a.txt\",
+   \"encoding\":\"windows-1252\",\"count\":2,\"matches\":[
      {\"line\":1,\"column\":4,\"offset\":3,\"match\":\"é\",\"text\":\"café\"}]}
 
 SUCCESS (info)
 
-  {\"ok\":true,\"command\":\"info\",\"bytes\":30,\"encoding\":\"windows-1252\",
-   \"detected_by\":\"guessed\",\"bom\":false,\"eol\":\"lf\",
-   \"eol_counts\":{\"lf\":3,\"crlf\":0,\"cr\":0},\"lines\":3,\"characters\":30,
-   \"ends_with_newline\":true,\"decode_errors\":false,\"roundtrip_safe\":true,
-   \"looks_binary\":false}
+  {\"ok\":true,\"command\":\"info\",\"path\":\"a.txt\",\"bytes\":30,
+   \"encoding\":\"windows-1252\",\"detected_by\":\"guessed\",\"bom\":false,
+   \"eol\":\"lf\",\"eol_counts\":{\"lf\":3,\"crlf\":0,\"cr\":0},\"lines\":3,
+   \"characters\":30,\"ends_with_newline\":true,\"decode_errors\":false,
+   \"roundtrip_safe\":true,\"looks_binary\":false}
+
+`info` carries no \"warnings\": its equivalent is a \"mojibake\" object, present
+only when the text holds mojibake-shaped sequences, and absent otherwise.
+
+  \"mojibake\":{\"count\":2,\"line\":1,\"sample\":\"Ã©\"}
 
 FAILURE (on stderr)
 
@@ -788,9 +858,13 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
              ```\n\n\
              `--encoding {label}` applies to `create` too, which otherwise makes UTF-8 files. \
              `--no-guess` turns a fall-back to statistical detection into an error instead of a \
-             silent wrong guess. `{cmd} info FILE` reports `detected_by: explicit` when the \
-             encoding was declared and `guessed` when it was not; `guessed` on a write is a bug \
-             in your invocation, not a detail to ignore.\n\n\
+             silent wrong guess.\n\n\
+             `{cmd} info FILE` reports `detected_by: explicit` when the encoding was declared. \
+             On a write, anything else means the flag did not reach the command. Do not read \
+             `utf-8-valid` as reassurance: it says only that the bytes *can* be read as UTF-8, \
+             which is also true of plenty of real `{label}` files, and `--no-guess` does not \
+             catch it — that guard covers `guessed` alone. `--encoding {label}` is the only \
+             thing that makes the encoding a decision rather than an inference.\n\n\
              Put the flags in the command every time. Do not try to set this once for the \
              session — `{cmd}` reads no environment variables and no config file, and each of \
              your commands may run in a fresh shell anyway.\n\n\
@@ -992,8 +1066,9 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
          config file, so there is nothing to set once for a session — and if each of your \
          commands runs in a fresh shell, an `export` would not survive to the next one anyway.\n\
          - **Do not \"fix\" mojibake by hand.** Characters like `Ã©` or `â€™` in a file mean an \
-         earlier write used the wrong encoding. Report it rather than editing the damaged text \
-         into a different shape.\n"
+         earlier write used the wrong encoding. `{cmd}` reports these as `mojibake` in `info` \
+         and warns before writing to such a file. Report it rather than editing the damaged \
+         text into a different shape.\n"
     )
 }
 

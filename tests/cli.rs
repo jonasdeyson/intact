@@ -710,10 +710,12 @@ fn editing_through_a_symlink_writes_the_target() {
 
     // The edit lands in the target, and the link is still a link.
     assert_eq!(read(&real), b"th\xE9\nr\xE9sum\xE9\n".to_vec());
-    assert!(std::fs::symlink_metadata(&link)
-        .unwrap()
-        .file_type()
-        .is_symlink());
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 
     // A chain of links resolves the same way, as does a link into a
     // subdirectory written relative to the link's own location.
@@ -733,10 +735,12 @@ fn editing_through_a_symlink_writes_the_target() {
     ]);
     assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(read(&deep), b"y\n".to_vec());
-    assert!(std::fs::symlink_metadata(&second)
-        .unwrap()
-        .file_type()
-        .is_symlink());
+    assert!(
+        std::fs::symlink_metadata(&second)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }
 
 #[cfg(unix)]
@@ -790,10 +794,12 @@ fn a_symlink_loop_is_refused() {
     let a = sb.dir.join("a.txt");
     let out = run(&["create", a.to_str().unwrap(), "--text", "hello"]);
     assert_eq!(code(&out), 9, "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(std::fs::symlink_metadata(&a)
-        .unwrap()
-        .file_type()
-        .is_symlink());
+    assert!(
+        std::fs::symlink_metadata(&a)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }
 
 #[test]
@@ -1806,4 +1812,89 @@ fn bom_add_needs_an_encoding_that_has_one() {
         0
     );
     assert!(read(&f).starts_with(&[0xEF, 0xBB, 0xBF]));
+}
+
+// UTF-8 that went through a windows-1252 pipe: "café" double-encoded, so the
+// text really does read `cafÃ©`, plus a `â€™` from a smart quote.
+const DOUBLE_ENCODED: &[u8] = b"caf\xC3\x83\xC2\xA9 l\xC3\xA2\xE2\x82\xAC\xE2\x84\xA2addition\n";
+
+/// Mojibake-shaped text is reported by `info` and warned about before a write,
+/// so the damage is visible rather than silently edited around.
+#[test]
+fn mojibake_is_reported_and_warned_about() {
+    let sb = Sandbox::new("mojibake");
+    let f = sb.file("a.txt", DOUBLE_ENCODED);
+    let p = f.to_str().unwrap();
+
+    let out = run(&["info", p, "--json"]);
+    assert_eq!(code(&out), 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["mojibake"]["count"], 2);
+    assert_eq!(v["mojibake"]["sample"], "Ã©");
+    assert_eq!(v["mojibake"]["line"], 1);
+
+    // A write reports it too, and still succeeds: this is an advisory, not a guard.
+    let out = run(&["replace", p, "--find", "addition", "--with", "note"]);
+    assert_eq!(code(&out), 0);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("mojibake-shaped"), "stderr was: {err}");
+    assert!(err.contains("inferred"), "stderr was: {err}");
+
+    // --quiet is about the success line, not about the warning.
+    let out = run(&["--quiet", "replace", p, "--find", "note", "--with", "sum"]);
+    assert!(stdout(&out).is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("mojibake-shaped"));
+}
+
+/// A legacy file read under a correct explicit --encoding whose content was
+/// damaged before intact saw it: still flagged, but without the "confirm the
+/// encoding" tail, which no longer applies once it has been declared.
+#[test]
+fn mojibake_in_a_declared_encoding_omits_the_detection_hint() {
+    let sb = Sandbox::new("mojibake-declared");
+    // windows-1252 bytes that are also valid UTF-8 - the ambiguous case.
+    let f = sb.file("a.txt", b"Le caf\xC3\xA9 est pr\xC3\xAAt.\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&["info", p, "--encoding", "windows-1252", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["mojibake"]["count"], 2);
+
+    let out = run(&[
+        "--encoding",
+        "windows-1252",
+        "replace",
+        p,
+        "--find",
+        "est",
+        "--with",
+        "reste",
+    ]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("mojibake-shaped"), "stderr was: {err}");
+    assert!(!err.contains("inferred"), "stderr was: {err}");
+
+    // Read as UTF-8 the same bytes are clean text, so nothing is reported.
+    // Nothing in the bytes distinguishes the two readings; only --encoding does.
+    let out = run(&["info", p, "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["detected_by"], "utf-8-valid");
+    assert!(v.get("mojibake").is_none());
+}
+
+/// The check must stay quiet on genuine text that merely contains the lead
+/// characters, or the warning becomes noise people learn to ignore.
+#[test]
+fn ordinary_accented_text_is_not_flagged_as_mojibake() {
+    let sb = Sandbox::new("mojibake-clean");
+    for (name, bytes) in [
+        ("pt.txt", "SÃO PAULO, região\n".as_bytes()),
+        ("fr.txt", "Un château, une âme, Âgé\n".as_bytes()),
+        ("mix.txt", "Ãtta ÂB Ãx â‚ é ü ñ\n".as_bytes()),
+    ] {
+        let f = sb.file(name, bytes);
+        let out = run(&["info", f.to_str().unwrap(), "--json"]);
+        let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+        assert!(v.get("mojibake").is_none(), "{name} was flagged: {v}");
+    }
 }
