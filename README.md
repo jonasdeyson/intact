@@ -18,13 +18,24 @@ This makes it a reliable text editing tool for AI agents prone to text corruptio
 
 ## Install
 
-From [crates.io](https://crates.io/crates/intact):
+### Precompiled binaries
+
+Precompiled binaries for Linux, macOS and Windows are available for each 
+[release](https://github.com/jonasdeyson/intact/releases) — unpack the archive
+for your platform and put the `intact` executable on `PATH`; no Rust toolchain
+needed.
+
+### crates.io
+
+You can install from [crates.io](https://crates.io/crates/intact) (requires Rust toolchain):
 
 ```console
 cargo install intact
 ```
 
-Or from source:
+### From source
+
+Install directly from the source root (requires Rust toolchain):
 
 ```console
 cargo install --path .
