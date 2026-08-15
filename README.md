@@ -1,6 +1,13 @@
 # intact
 
+[![CI](https://github.com/jonasdeyson/intact/actions/workflows/ci.yml/badge.svg)](https://github.com/jonasdeyson/intact/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/intact.svg)](https://crates.io/crates/intact)
+[![MSRV](https://img.shields.io/badge/rust-1.85%2B-blue.svg)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An encoding-preserving command-line text editor.
+
+## Summary
 
 Some AI agents decode files to UTF-8 internally, so writing them back naively
 re-encodes everything as UTF-8 and turns a Latin-1 `café` into `cafÃ©`.
@@ -25,9 +32,16 @@ windows-1252, and every byte outside the replaced span is untouched.
 
 ## Install
 
+From [crates.io](https://crates.io/crates/intact):
+
 ```console
-cargo build --release
-install -m755 target/release/intact ~/.local/bin/
+cargo install intact
+```
+
+Or from source:
+
+```console
+cargo install --path .
 ```
 
 ## The binary documents itself
@@ -500,9 +514,15 @@ passing `--encoding` removes the guesswork entirely.
 ## Development
 
 ```console
-cargo test        # 31 unit + 67 end-to-end tests
+cargo test        # unit + end-to-end tests
 cargo clippy --all-targets
+cargo fmt --check
 ```
+
+CI runs those three on every push and pull request — the test suite on Linux,
+macOS and Windows, plus a `cargo check` against the minimum supported Rust
+version (1.85, the edition 2024 floor). The workflow is
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 The manual lives in [`src/manual.rs`](src/manual.rs), not in this README — the
 binary is the source of truth, and tests assert that every command appears in
