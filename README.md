@@ -9,26 +9,12 @@ An encoding-preserving command-line text editor.
 
 ## Summary
 
-Some AI agents decode files to UTF-8 internally, so writing them back naively
-re-encodes everything as UTF-8 and turns a Latin-1 `café` into `cafÃ©`.
-`intact` takes UTF-8 text on the command line, transcodes it into whatever
-encoding the target file already uses, and splices it in without touching any other byte.
+It is a known issue that some AI agents corrupt files containing accented characters
+(á, à, ã, ú, ç, etc.) when editing them.
+This seems to happen especially when the files use an encoding other than UTF-8, and can affect characters far from the sections being edited.
 
-```console
-$ intact info cfg.ini
-path:            cfg.ini
-bytes:           137
-encoding:        windows-1252 (detected by: guessed)
-...
-edit safety:     byte-exact (edits keep every untouched byte)
-
-$ intact replace cfg.ini --find 'pequenas empresas' --with 'organizações públicas'
-cfg.ini: updated (windows-1252, lf) - replaced 1 of 1 occurrence(s)
-```
-
-The replacement went in as `6f7267616e697a61e7f56573 20 fa62...` — `ç` as the
-single byte `0xE7`, `õ` as `0xF5`, `ú` as `0xFA`. The file is still
-windows-1252, and every byte outside the replaced span is untouched.
+`intact` is a command-line text editor that prevents character corruption by preserving encodings and EOL sequences, and by not touching bytes outside the edited segments.
+This makes it a reliable text editing tool for AI agents prone to text corruption problems.
 
 ## Install
 
@@ -44,7 +30,7 @@ Or from source:
 cargo install --path .
 ```
 
-## The binary documents itself
+## Self-contained documentation
 
 You can hand an agent nothing but the executable. Everything below is reachable
 from `--help`:
@@ -69,7 +55,7 @@ no configuration file — an agent typically runs each command in a fresh shell,
 so an `export` from one invocation would not survive to the next, and a setting
 that applies only sometimes is worse than one that never applies.
 
-### Telling another project's agent about it
+### Teaching an agent how to use it
 
 `intact instructions` prints a Markdown section to paste into another
 project's `CLAUDE.md` / `AGENTS.md`:
@@ -89,16 +75,7 @@ rules for anchoring edits and reading exit codes. Options:
 | `--command NAME` | how the binary is invoked there (e.g. an absolute path) |
 | `--legacy-only` | narrow the mandate to non-UTF-8 files only |
 | `--heading-level N` | heading depth, 1–4 (default 2) |
-| `--wsl [DISTRO]` | the agent is on Windows and the binary is in WSL |
-
-`--wsl` is for the split setup: `intact` built inside WSL as a Linux binary,
-while the agent editing the project runs on Windows and types into PowerShell,
-cmd or Git Bash. Running `intact` there fails — the ELF binary is not
-executable by Windows. The generated section opens with the rule that every
-command goes through `wsl.exe` (`--wsl Ubuntu-24.04` pins the distribution),
-and covers the two follow-on traps: paths are WSL paths, so `C:\src\app.py` is
-a junk relative filename on the other side, and quoting is the Windows shell's
-job. The command list itself stays unprefixed and readable.
+| `--wsl [DISTRO]` | can be used when the agent is on Windows and `intact` is a Linux binary in WSL |
 
 ## The guarantees
 
@@ -145,7 +122,7 @@ With `--json`, failures print a parseable object on **stderr**:
 
 ## Commands
 
-### Inspect
+### Inspection
 
 ```console
 intact info FILE                    # encoding, BOM, line endings, edit safety
@@ -161,7 +138,7 @@ intact instructions                 # a CLAUDE.md section for another project
 `search` exits 3 when nothing matched (use `--allow-empty` for exit 0). Human
 output is `path:line:column:line-text`.
 
-### Edit
+### Editing
 
 ```console
 intact replace FILE --find TEXT --with TEXT
@@ -289,8 +266,8 @@ CHANGELOG.md: updated (UTF-8, lf) - applied 1 operation(s)
 
 Each file is decoded, checked and written back in its own encoding, which is
 why every other command takes exactly one file. Reporting is one summary line
-per file; under `--json`, a `files` array with one object per file — always an
-array, whether the script touched one file or twenty.
+per file; under `--json`, it's a `files` array with one object per file —
+always an array, whether the script touched one file or twenty.
 
 Every operation runs against an in-memory copy and nothing reaches disk until
 all of them have succeeded. The writes are then one atomic rename per file;
@@ -311,6 +288,7 @@ partway through that last step can leave earlier files written. A failing
 | `--no-guess` | refuse to *write* to a file whose encoding was only guessed |
 | `--unmappable POLICY` | `error` (default), `replace` (`?`), `xml` (`&#NNN;`), `skip` |
 | `--eol MODE` | `auto` (default), `lf`, `crlf`, `cr`, `keep` |
+| `--strict-eol` | refuse to write when the file's existing line endings don't match `--eol` |
 | `--escapes` | interpret backslash escapes in supplied text |
 | `--lossy` | permit rewriting a file that does not round-trip |
 | `--force` | edit a file that contains NUL bytes |
