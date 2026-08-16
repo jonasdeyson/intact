@@ -104,7 +104,10 @@ GUARANTEES
 
 3. No silent corruption. If the file does not round-trip, or if your text
    contains a character the file's encoding cannot represent, the command fails
-   with a distinct exit code and writes nothing.
+   with a distinct exit code and writes nothing. A file that does not read as
+   text is refused outright, by the reading commands as much as the writing
+   ones: `view` on a binary would otherwise pour NULs and escape sequences into
+   your terminal and report nothing wrong.
 
 4. Line endings and BOMs are preserved. Inserted text is rewritten to the file's
    dominant line ending; a BOM stays exactly as it was; a missing final newline
@@ -136,9 +139,27 @@ WHEN A COMMAND REFUSES
     replace requires a unique match by default. Pass --all, --occurrence N,
     --lines RANGE, or extend --find until it is unique. Exit code 4.
 
-  FILE contains NUL bytes and does not look like a text file
+  FILE does not look like a text file: REASON
 
-    Pass --force if you really mean it. Exit code 5.
+    The first 8 KiB of the file do not read as text: a NUL byte, a high
+    proportion of control characters, or - in UTF-16 - an unpaired surrogate.
+    This guard covers reading as well as writing, so `view` and `search` refuse
+    too; `info` is the exception and always reports. Pass --force if you really
+    mean it. Exit code 5.
+
+    `info` reports such a file as its bytes and a verdict — path, size, and a
+    `not text:` line naming the reason — and withholds the rest. Everything
+    below `bytes` describes the file decoded as text: an encoding detection run
+    over it, the line endings of the result, how many characters it came to.
+    None of that is a fact about a file that is not text. The encoding is a
+    guess about a blob, and the line endings are however many 0x0A bytes
+    happened to fall in it. `info --force` prints the full report anyway,
+    --force meaning here what it means everywhere else.
+
+    One REASON has a better answer than --force: \"a NUL every other byte,
+    which is how UTF-16LE with no BOM reads as single bytes\" means the file is
+    text that nothing declared the encoding of. Detection cannot find it
+    unaided. Pass --encoding utf-16le (or utf-16be) and it reads normally.
 
 SHOWING THE CHANGE
 
@@ -530,10 +551,29 @@ SUCCESS (info)
    \"characters\":30,\"ends_with_newline\":true,\"decode_errors\":false,
    \"roundtrip_safe\":true,\"looks_binary\":false}
 
-`info` carries no \"warnings\": its equivalent is a \"mojibake\" object, present
-only when the text holds mojibake-shaped sequences, and absent otherwise.
+`info` carries no \"warnings\": its equivalent is two optional objects, each
+present only when it applies, and never both — mojibake is not reported for a
+file that is not text. \"mojibake\" reports mojibake-shaped sequences:
 
   \"mojibake\":{\"count\":2,\"line\":1,\"sample\":\"Ã©\"}
+
+and \"binary\" says why the file was judged not to be text, which is why every
+other command refuses it. \"reason\" is one of nul, utf-16-no-bom,
+unpaired-surrogate or controls; \"offset\" is null where the judgement rests on
+a proportion rather than one position.
+
+  \"binary\":{\"reason\":\"nul\",\"offset\":7,\"detail\":\"NUL byte at offset 7 (0x7)\"}
+
+When \"binary\" is present, every field derived from decoding the file is
+absent, because none of them describes the file. Test for \"binary\" (or read
+\"looks_binary\", which is always present) before reading \"encoding\",
+\"eol\", \"lines\" or the rest, and expect this shape:
+
+  {\"ok\":true,\"command\":\"info\",\"path\":\"a.bin\",\"bytes\":142312,
+   \"looks_binary\":true,\"binary\":{...}}
+
+Adding --force decodes it as text regardless and returns the full object, the
+\"binary\" object included.
 
 FAILURE (on stderr)
 
@@ -1046,7 +1086,9 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
          `{{\"ok\":false,\"kind\":...}}` object on stderr.\n\
          - **Never pass `--lossy` or `--force` on your own initiative.** They exist for a human \
          who has decided to accept the damage. `--lossy` rewrites the whole file and can change \
-         bytes you never touched.\n\
+         bytes you never touched. `--force` overrides the refusal to touch a file that does not \
+         read as text, for reading as well as editing: if `view` or `search` refuses a file, it \
+         is not one you should be reading, and forcing it puts raw bytes into your context.\n\
          - **Exit 5 means stop and look.** Either the file's encoding cannot represent a \
          character you are inserting — run `{cmd} convert FILE --to utf-8` first if converting \
          the file is acceptable — or detection guessed the encoding wrong, in which case run \

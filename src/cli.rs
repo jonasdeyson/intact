@@ -119,7 +119,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub lossy: bool,
 
-    /// Edit even when the file looks binary (contains NUL bytes)
+    /// Read or edit even when the file does not look like text
     #[arg(long, global = true)]
     pub force: bool,
 
@@ -173,6 +173,9 @@ const WRITE: &[&str] = &["dry_run", "show_diff", "diff_context", "quiet"];
 const BACKUP: &[&str] = &["backup"];
 /// The guards that refuse to write to an existing file, and their overrides.
 const GUARD: &[&str] = &["no_guess", "force", "lossy"];
+/// The binary guard alone, which refuses reads too — so the read-only commands
+/// advertise its override without the write-only guards beside it.
+const BINARY: &[&str] = &["force"];
 /// Encoding text intact adds into the file's own encoding.
 const ENCODE: &[&str] = &["unmappable"];
 /// Line endings for text intact adds.
@@ -185,9 +188,12 @@ const ESCAPES: &[&str] = &["escapes"];
 /// The groups each subcommand honours. Everything else is hidden from its help.
 #[rustfmt::skip]
 const GLOBALS_BY_COMMAND: &[(&str, &[&[&str]])] = &[
-    ("info",          &[FILE]),
-    ("view",          &[FILE]),
-    ("search",        &[FILE, ESCAPES]),
+    // The binary guard never stops `info`; --force instead means what it means
+    // everywhere else - treat the file as text - and prints the text-level
+    // report that a non-text file otherwise withholds.
+    ("info",          &[FILE, BINARY]),
+    ("view",          &[FILE, BINARY]),
+    ("search",        &[FILE, BINARY, ESCAPES]),
     ("replace",       &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
     ("insert",        &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
     ("append",        &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),

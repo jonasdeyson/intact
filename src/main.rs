@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 
 use cli::{BomMode, Cli, Command};
-use document::{Detection, Document, ForcedEncoding};
+use document::{BinaryPolicy, Detection, Document, ForcedEncoding};
 use encoding_util::{BomKind, encode_text};
 use error::{AppError, ErrorKind, Result};
 use lines::{Eol, EolMode, LineIndex, LineRange};
@@ -140,88 +140,142 @@ fn cmd_guide(cli: &Cli, args: &cli::GuideArgs) -> Result<i32> {
 }
 
 fn cmd_info(cli: &Cli, path: &Path, forced: Option<ForcedEncoding>) -> Result<i32> {
-    let doc = Document::load(path, forced)?;
-    let (eol, lf, crlf, cr) = lines::detect_eol(&doc.text);
+    // `info` never refuses: it is how a caller finds out why everything else did.
+    let doc = Document::load(path, forced, BinaryPolicy::Allow)?;
     let resolved = document::link_target(&doc.path).map(|p| p.display().to_string());
+
+    // Everything below `bytes` describes the file decoded as text: an encoding
+    // detection run over it, the line endings of the result, how many
+    // characters it came to. For a file that is not text, not one of those is
+    // a fact about the file - the encoding is a guess about a blob, and the
+    // line endings are however many 0x0A bytes happened to fall in it. So the
+    // whole text-level report is withheld rather than qualified: a reader who
+    // has to be told which of twelve numbers to disregard has been handed the
+    // work `info` exists to do. `--force` means "treat this as text" here as
+    // everywhere else, and prints it in full.
+    let text_report = doc.binary.is_none() || cli.force;
+
     let mut value = json!({
         "ok": true,
         "command": "info",
         "path": doc.path.display().to_string(),
         "bytes": doc.raw.len(),
-        "encoding": doc.encoding.name(),
-        "detected_by": doc.detection.as_str(),
-        "bom": doc.bom.is_some(),
-        "eol": eol.name(),
-        "eol_counts": { "lf": lf, "crlf": crlf, "cr": cr },
-        "lines": doc.lines().count(),
-        "characters": doc.text.chars().count(),
-        "ends_with_newline": lines::ends_with_eol(&doc.text),
-        "decode_errors": doc.had_decode_errors,
-        "roundtrip_safe": doc.roundtrip,
         "looks_binary": doc.looks_binary(),
     });
     if let (Some(resolved), Some(obj)) = (&resolved, value.as_object_mut()) {
         obj.insert("resolved_path".into(), json!(resolved));
     }
-    let mojibake = doc.mojibake();
-    if let (Some(hint), Some(obj)) = (&mojibake, value.as_object_mut()) {
+    if let (Some(hint), Some(obj)) = (doc.binary, value.as_object_mut()) {
         obj.insert(
-            "mojibake".into(),
+            "binary".into(),
             json!({
-                "count": hint.count,
-                "line": doc.lines().line_of_offset(hint.offset),
-                "sample": hint.sample,
+                "reason": hint.reason(),
+                "offset": hint.offset(),
+                "detail": hint.describe(),
             }),
         );
     }
 
+    let (eol, lf, crlf, cr) = lines::detect_eol(&doc.text);
+    let mojibake = doc.mojibake();
+    if let Some(obj) = value.as_object_mut().filter(|_| text_report) {
+        obj.insert("encoding".into(), json!(doc.encoding.name()));
+        obj.insert("detected_by".into(), json!(doc.detection.as_str()));
+        obj.insert("bom".into(), json!(doc.bom.is_some()));
+        obj.insert("eol".into(), json!(eol.name()));
+        obj.insert(
+            "eol_counts".into(),
+            json!({ "lf": lf, "crlf": crlf, "cr": cr }),
+        );
+        obj.insert("lines".into(), json!(doc.lines().count()));
+        obj.insert("characters".into(), json!(doc.text.chars().count()));
+        obj.insert(
+            "ends_with_newline".into(),
+            json!(lines::ends_with_eol(&doc.text)),
+        );
+        obj.insert("decode_errors".into(), json!(doc.had_decode_errors));
+        obj.insert("roundtrip_safe".into(), json!(doc.roundtrip));
+        if let Some(hint) = &mojibake {
+            obj.insert(
+                "mojibake".into(),
+                json!({
+                    "count": hint.count,
+                    "line": doc.lines().line_of_offset(hint.offset),
+                    "sample": hint.sample,
+                }),
+            );
+        }
+    }
+
     if cli.json {
         println!("{value}");
-    } else {
-        println!("path:            {}", doc.path.display());
-        if let Some(resolved) = &resolved {
-            println!("symlink to:      {resolved}");
+        return Ok(0);
+    }
+
+    println!("path:            {}", doc.path.display());
+    if let Some(resolved) = &resolved {
+        println!("symlink to:      {resolved}");
+    }
+    println!("bytes:           {}", doc.raw.len());
+    if let Some(hint) = doc.binary {
+        let tail = if text_report {
+            "The report below reads it as text, because --force was given."
+        } else {
+            "The rest of this report would describe a decoding of the bytes \
+             rather than the file, and is withheld."
+        };
+        println!(
+            "not text:        {}",
+            wrap_indented(
+                &format!(
+                    "{}. Every command but `info` refuses it - {}. {tail}",
+                    hint.describe(),
+                    hint.fix()
+                ),
+                78,
+                17
+            )
+        );
+    }
+    if !text_report {
+        return Ok(0);
+    }
+
+    println!(
+        "encoding:        {} (detected by: {})",
+        doc.encoding.name(),
+        doc.detection.as_str()
+    );
+    println!(
+        "bom:             {}",
+        if doc.bom.is_some() { "yes" } else { "no" }
+    );
+    println!(
+        "line endings:    {} (lf={lf}, crlf={crlf}, cr={cr})",
+        eol.name()
+    );
+    println!("lines:           {}", doc.lines().count());
+    println!("characters:      {}", doc.text.chars().count());
+    println!(
+        "final newline:   {}",
+        if lines::ends_with_eol(&doc.text) {
+            "yes"
+        } else {
+            "no"
         }
-        println!("bytes:           {}", doc.raw.len());
-        println!(
-            "encoding:        {} (detected by: {})",
-            doc.encoding.name(),
-            doc.detection.as_str()
-        );
-        println!(
-            "bom:             {}",
-            if doc.bom.is_some() { "yes" } else { "no" }
-        );
-        println!(
-            "line endings:    {} (lf={lf}, crlf={crlf}, cr={cr})",
-            eol.name()
-        );
-        println!("lines:           {}", doc.lines().count());
-        println!("characters:      {}", doc.text.chars().count());
-        println!(
-            "final newline:   {}",
-            if lines::ends_with_eol(&doc.text) {
-                "yes"
-            } else {
-                "no"
-            }
-        );
-        println!(
-            "edit safety:     {}",
-            if doc.roundtrip {
-                "byte-exact (edits keep every untouched byte)"
-            } else if doc.had_decode_errors {
-                "UNSAFE - the file has bytes that are invalid in this encoding"
-            } else {
-                "UNSAFE - the file does not round-trip through this encoding"
-            }
-        );
-        if doc.looks_binary() {
-            println!("warning:         file contains NUL bytes and may not be text");
+    );
+    println!(
+        "edit safety:     {}",
+        if doc.roundtrip {
+            "byte-exact (edits keep every untouched byte)"
+        } else if doc.had_decode_errors {
+            "UNSAFE - the file has bytes that are invalid in this encoding"
+        } else {
+            "UNSAFE - the file does not round-trip through this encoding"
         }
-        if let Some(warning) = doc.mojibake_warning() {
-            println!("warning:         {}", wrap_indented(&warning, 78, 17));
-        }
+    );
+    if let Some(warning) = doc.mojibake_warning() {
+        println!("warning:         {}", wrap_indented(&warning, 78, 17));
     }
     Ok(0)
 }
@@ -249,7 +303,7 @@ fn wrap_indented(text: &str, width: usize, indent: usize) -> String {
 }
 
 fn cmd_view(cli: &Cli, args: &cli::ViewArgs, forced: Option<ForcedEncoding>) -> Result<i32> {
-    let doc = Document::load(&args.file, forced)?;
+    let doc = Document::load(&args.file, forced, binary_policy(cli))?;
     let index = doc.lines();
 
     let (first, last) = match &args.lines {
@@ -297,7 +351,7 @@ fn cmd_view(cli: &Cli, args: &cli::ViewArgs, forced: Option<ForcedEncoding>) -> 
 }
 
 fn cmd_search(cli: &Cli, args: &cli::SearchArgs, forced: Option<ForcedEncoding>) -> Result<i32> {
-    let doc = Document::load(&args.file, forced)?;
+    let doc = Document::load(&args.file, forced, binary_policy(cli))?;
     let pattern = textsrc::resolve_pair(
         &args.find,
         &args.find_file,
@@ -347,19 +401,22 @@ fn ctx_for(cli: &Cli, doc: &Document) -> Ctx {
     }
 }
 
-/// Guard against silently mangling something that is not a text file.
-fn preflight(cli: &Cli, doc: &Document) -> Result<()> {
-    if doc.looks_binary() && !cli.force {
-        return Err(AppError::new(
-            ErrorKind::Encoding,
-            format!(
-                "{} contains NUL bytes and does not look like a text file",
-                doc.path.display()
-            ),
-        )
-        .with_hint("pass --force to edit it anyway"));
+/// Whether this invocation will accept a file that does not look like text.
+/// The guard applies to reads as well as writes, so every command resolves it
+/// the same way; `info` is the one exception and passes `Allow` outright,
+/// being the command that explains why the others refused.
+fn binary_policy(cli: &Cli) -> BinaryPolicy {
+    if cli.force {
+        BinaryPolicy::Allow
+    } else {
+        BinaryPolicy::Refuse
     }
+}
 
+/// Guard against silently mangling something that is not a text file. The
+/// binary check itself lives in `Document::load`, so that a file about to be
+/// refused is never decoded.
+fn preflight(cli: &Cli, doc: &Document) -> Result<()> {
     check_eol_mandate(cli, doc)?;
 
     // Under a project-wide encoding mandate, a guess is not good enough: a
@@ -456,9 +513,9 @@ fn cmd_edit(cli: &Cli, forced: Option<ForcedEncoding>) -> Result<i32> {
     };
 
     let doc = if allow_missing {
-        Document::load_or_empty(path, forced)?
+        Document::load_or_empty(path, forced, binary_policy(cli))?
     } else {
-        Document::load(path, forced)?
+        Document::load(path, forced, binary_policy(cli))?
     };
     preflight(cli, &doc)?;
     let ctx = ctx_for(cli, &doc);
@@ -523,7 +580,7 @@ fn cmd_edit(cli: &Cli, forced: Option<ForcedEncoding>) -> Result<i32> {
 }
 
 fn cmd_create(cli: &Cli, args: &cli::CreateArgs, forced: Option<ForcedEncoding>) -> Result<i32> {
-    let doc = Document::load_or_empty(&args.file, forced)?;
+    let doc = Document::load_or_empty(&args.file, forced, binary_policy(cli))?;
     // Refusing outright is the whole difference between `create` and `write`;
     // an --overwrite flag here would just be a second spelling of `write`.
     if doc.existed {
@@ -675,7 +732,7 @@ fn finish(cli: &Cli, doc: &Document, command: &'static str, outcome: OpOutcome) 
 // ----------------------------------------------------------------- convert
 
 fn cmd_convert(cli: &Cli, args: &cli::ConvertArgs, forced: Option<ForcedEncoding>) -> Result<i32> {
-    let doc = Document::load(&args.file, forced)?;
+    let doc = Document::load(&args.file, forced, binary_policy(cli))?;
     preflight(cli, &doc)?;
     // Omitting --to keeps the current encoding, which is what you want when
     // only --newlines is being changed.
@@ -939,7 +996,7 @@ fn cmd_batch(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -
         let slot = match targets.iter().position(|t| t.original.path == path) {
             Some(idx) => idx,
             None => {
-                let original = Document::load(&path, forced)?;
+                let original = Document::load(&path, forced, binary_policy(cli))?;
                 preflight(cli, &original)?;
                 // Pin the encoding so re-decoding between steps cannot drift,
                 // keeping the original source so `detected_by` stays truthful.

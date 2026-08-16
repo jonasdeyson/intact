@@ -1107,6 +1107,210 @@ fn binary_files_are_refused_by_default() {
     assert_eq!(code(&out), 5);
 }
 
+/// The guard covers reading, not only writing: `view` on a binary would
+/// otherwise emit raw NULs and escape sequences and exit 0.
+#[test]
+fn binary_files_are_refused_by_the_reading_commands_too() {
+    let sb = Sandbox::new("binaryread");
+    let f = sb.file("a.bin", b"abc\x00def\n");
+    let p = f.to_str().unwrap();
+
+    for args in [
+        vec!["view", p],
+        vec!["search", p, "--find", "abc"],
+        vec!["convert", p, "--to", "utf-8"],
+    ] {
+        let out = run(&args);
+        assert_eq!(code(&out), 5, "{} was not refused", args[0]);
+        assert!(out.stdout.is_empty(), "{} wrote to stdout", args[0]);
+    }
+
+    // --force is the single override, for reads as for writes.
+    let out = run(&["view", p, "--force"]);
+    assert_eq!(code(&out), 0);
+    assert_eq!(out.stdout, b"abc\x00def\n");
+}
+
+/// `info` is the exception: it is how a caller learns why the rest refused,
+/// so it always reports. What it reports for a non-text file is the byte-level
+/// truth and the verdict, and nothing derived from decoding it - an encoding
+/// guessed for a blob, and the line endings of the result, are not facts about
+/// the file.
+#[test]
+fn info_reports_the_verdict_and_withholds_the_text_report() {
+    let sb = Sandbox::new("binaryinfo");
+    let f = sb.file("a.bin", b"abc\x00def\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&["info", p]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("not text:"), "{text}");
+    assert!(text.contains("NUL byte at offset 3"), "{text}");
+    for withheld in [
+        "encoding:",
+        "bom:",
+        "line endings:",
+        "lines:",
+        "characters:",
+        "final newline:",
+        "edit safety:",
+    ] {
+        assert!(!text.contains(withheld), "{withheld} survived:\n{text}");
+    }
+    // What is true of the bytes stays.
+    assert!(text.contains("bytes:           8"), "{text}");
+
+    let v: serde_json::Value = serde_json::from_str(&stdout(&run(&["info", p, "--json"]))).unwrap();
+    assert_eq!(v["looks_binary"], true);
+    assert_eq!(v["binary"]["reason"], "nul");
+    assert_eq!(v["binary"]["offset"], 3);
+    assert_eq!(v["bytes"], 8);
+    for withheld in [
+        "encoding",
+        "detected_by",
+        "bom",
+        "eol",
+        "lines",
+        "characters",
+    ] {
+        assert!(v.get(withheld).is_none(), "{withheld} survived: {v}");
+    }
+}
+
+/// --force means "treat this as text" for `info` as it does everywhere else,
+/// so the withheld report comes back in full - with the verdict still on top.
+#[test]
+fn info_force_prints_the_text_report_for_a_binary() {
+    let sb = Sandbox::new("binaryinfoforce");
+    let f = sb.file("a.bin", b"abc\x00def\n");
+    let p = f.to_str().unwrap();
+
+    let text = stdout(&run(&["info", p, "--force"]));
+    assert!(text.contains("not text:"), "{text}");
+    assert!(text.contains("encoding:"), "{text}");
+    assert!(text.contains("line endings:"), "{text}");
+    assert!(text.contains("edit safety:"), "{text}");
+
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout(&run(&["info", p, "--json", "--force"]))).unwrap();
+    assert_eq!(v["looks_binary"], true);
+    assert!(v.get("encoding").is_some(), "{v}");
+    assert!(v.get("binary").is_some(), "{v}");
+}
+
+/// The mojibake shape is two ordinary bytes in sequence, so any blob turns it
+/// up by chance. Reporting it alongside "this is not a text file" would tell
+/// the reader to go and report damage in an ELF binary.
+#[test]
+fn binary_files_are_not_also_reported_as_mojibake() {
+    let sb = Sandbox::new("binarymoji");
+    // "Ã©" in windows-1252 is the canonical mojibake shape; the NUL is what
+    // makes this a non-text file.
+    let f = sb.file("a.bin", b"\x00\xC3\xA9 \xC3\xA9 \xC3\xA9 \xC3\xA9\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&["info", p]);
+    let text = stdout(&out);
+    assert!(!text.contains("mojibake"), "{text}");
+    let v: serde_json::Value = serde_json::from_str(&stdout(&run(&["info", p, "--json"]))).unwrap();
+    assert!(v.get("mojibake").is_none(), "{v}");
+
+    // Nor on the write path, where --force has got past the guard.
+    let out = run(&["append", p, "--text", "x", "--force"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("mojibake"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A text file carrying the same shape still gets the warning. Written as
+    // double-encoded UTF-8, since without the NUL the file decodes as UTF-8
+    // and the windows-1252 reading that turns C3 A9 into "Ã©" never happens.
+    let g = sb.file(
+        "b.txt",
+        b"caf\xC3\x83\xC2\xA9 r\xC3\x83\xC2\xA9sum\xC3\x83\xC2\xA9\n",
+    );
+    assert!(stdout(&run(&["info", g.to_str().unwrap()])).contains("mojibake"));
+}
+
+/// An ordinary text file is unaffected by any of the above: it still gets the
+/// full report, dominant line ending and all.
+#[test]
+fn text_files_keep_the_whole_report() {
+    let sb = Sandbox::new("binaryeol");
+    let g = sb.file("b.txt", b"abcd\ne\nf\n");
+    let text = stdout(&run(&["info", g.to_str().unwrap()]));
+    assert!(text.contains("line endings:    lf ("), "{text}");
+    assert!(text.contains("edit safety:     byte-exact"), "{text}");
+    assert!(!text.contains("not text:"), "{text}");
+}
+
+/// High-entropy data with no NUL in it: the case the old NUL-only check let
+/// through.
+#[test]
+fn binary_without_nul_bytes_is_refused() {
+    let sb = Sandbox::new("binarynonul");
+    let mut data = Vec::new();
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    while data.len() < 4000 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let b = (state >> 33) as u8;
+        if b != 0 {
+            data.push(b);
+        }
+    }
+    let f = sb.file("a.bin", &data);
+    let out = run(&["view", f.to_str().unwrap()]);
+    assert_eq!(code(&out), 5);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("control characters"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// UTF-16 with no BOM is text nothing declared the encoding of, not binary.
+/// The refusal has to name the flag that fixes it, or it is a dead end:
+/// detection cannot find UTF-16 unaided.
+#[test]
+fn bom_less_utf16_is_refused_with_the_encoding_that_reads_it() {
+    let sb = Sandbox::new("utf16nobom");
+    let bytes: Vec<u8> = "héllo wörld\nsecond line\n"
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
+    let f = sb.file("a.txt", &bytes);
+    let p = f.to_str().unwrap();
+
+    let out = run(&["view", p]);
+    assert_eq!(code(&out), 5);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(err.contains("UTF-16LE with no BOM"), "{err}");
+    assert!(err.contains("--encoding utf-16le"), "{err}");
+
+    // And that flag really does read it.
+    let out = run(&["view", p, "--encoding", "utf-16le"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(stdout(&out), "héllo wörld\nsecond line\n");
+}
+
+/// A BOM'd UTF-16 file is ordinary text and must stay unaffected by all of
+/// the above - its bytes are half NULs.
+#[test]
+fn utf16_with_a_bom_is_not_treated_as_binary() {
+    let sb = Sandbox::new("utf16bom");
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend("héllo\n".encode_utf16().flat_map(|u| u.to_le_bytes()));
+    let f = sb.file("a.txt", &bytes);
+    let out = run(&["view", f.to_str().unwrap()]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(stdout(&out), "héllo\n");
+}
+
 #[test]
 fn missing_file_exits_eight() {
     let sb = Sandbox::new("missing");

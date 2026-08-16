@@ -11,7 +11,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use encoding_rs::{Encoding, UTF_8};
+use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 
 use crate::encoding_util::{
     BomKind, EncodedMap, MojibakeHint, UnmappablePolicy, build_encoded_map, encode_text,
@@ -64,6 +64,245 @@ impl ForcedEncoding {
     }
 }
 
+// ------------------------------------------------------------ binary sniff
+
+/// Why a file was judged not to be text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryHint {
+    /// A NUL, at this byte offset.
+    Nul { offset: usize },
+    /// A NUL every other byte: not binary at all, but UTF-16 with no BOM,
+    /// read as single bytes because nothing declared the encoding. `be` is
+    /// which half of each pair holds the NUL.
+    Utf16NoBom { be: bool },
+    /// An unpaired surrogate code unit, at this byte offset. Only UTF-16 files
+    /// are tested for this, and well-formed ones never contain one.
+    Surrogate { offset: usize },
+    /// `count` stray control characters among the `total` read from the
+    /// sniffed prefix (bytes, or UTF-16 code units).
+    Controls { count: usize, total: usize },
+}
+
+impl BinaryHint {
+    /// Stable tag for `--json`.
+    pub fn reason(self) -> &'static str {
+        match self {
+            BinaryHint::Nul { .. } => "nul",
+            BinaryHint::Utf16NoBom { .. } => "utf-16-no-bom",
+            BinaryHint::Surrogate { .. } => "unpaired-surrogate",
+            BinaryHint::Controls { .. } => "controls",
+        }
+    }
+
+    /// The byte offset the judgement rests on, where it rests on one.
+    pub fn offset(self) -> Option<usize> {
+        match self {
+            BinaryHint::Nul { offset } | BinaryHint::Surrogate { offset } => Some(offset),
+            BinaryHint::Utf16NoBom { .. } | BinaryHint::Controls { .. } => None,
+        }
+    }
+
+    /// What the caller should do about it. Only the UTF-16 case has a real
+    /// answer; the rest can only be overridden.
+    pub fn fix(self) -> String {
+        match self {
+            BinaryHint::Utf16NoBom { be } => format!(
+                "pass --encoding {} to read it as the text it is, or --force to take it as bytes",
+                if be { "utf-16be" } else { "utf-16le" }
+            ),
+            _ => "pass --force to use it anyway".to_string(),
+        }
+    }
+
+    /// The same, for a command that has just refused the file — where
+    /// `info` is worth naming, since it is the way to see more.
+    fn refusal_hint(self) -> String {
+        match self {
+            BinaryHint::Utf16NoBom { .. } => self.fix(),
+            _ => format!("run `intact info FILE` to inspect it, or {}", self.fix()),
+        }
+    }
+
+    pub fn describe(self) -> String {
+        match self {
+            BinaryHint::Nul { offset } => format!("NUL byte at offset {offset} (0x{offset:X})"),
+            BinaryHint::Utf16NoBom { be } => format!(
+                "a NUL every other byte, which is how UTF-16{} with no BOM reads as single bytes",
+                if be { "BE" } else { "LE" }
+            ),
+            BinaryHint::Surrogate { offset } => {
+                format!("unpaired UTF-16 surrogate at offset {offset} (0x{offset:X})")
+            }
+            BinaryHint::Controls { count, total } => format!(
+                "{}% control characters ({count} of the first {total})",
+                count * 100 / total.max(1)
+            ),
+        }
+    }
+}
+
+/// Whether the caller will accept a file that does not look like text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryPolicy {
+    /// Refuse it before decoding. The default for every command but `info`.
+    Refuse,
+    /// Load it anyway: `--force`, or `info`, which exists to explain refusals.
+    Allow,
+}
+
+/// How much of the file the sniff reads. The same 8 KiB prefix git uses: a NUL
+/// 40 MB in says less about a file than its header does, and a bounded prefix
+/// keeps the check cheap enough to run *before* decoding, which is the point —
+/// decoding a large blob builds a character offset table costing several bytes
+/// per character, and there is no reason to pay that for a file about to be
+/// refused.
+const SNIFF_WINDOW: usize = 8192;
+
+/// The share of stray control characters above which a prefix is called
+/// binary. High-entropy data (compressed, encrypted, machine code) carries
+/// around 10% by chance, 27 of the 256 byte values being stray controls.
+const CONTROL_PERCENT: usize = 5;
+
+/// Below this many, a ratio over so short a prefix means nothing: a two-byte
+/// file holding one stray control is 50% control and still probably text.
+const CONTROL_MIN: usize = 4;
+
+/// Whether `c` is a control character that carries no meaning in text. Tab,
+/// LF, form feed and CR are ordinary layout, and ESC is how ISO-2022-JP
+/// switches character sets.
+fn is_stray_control(c: u32) -> bool {
+    c < 0x20 && !matches!(c, 0x09 | 0x0A | 0x0C | 0x0D | 0x1B)
+}
+
+fn control_verdict(count: usize, total: usize) -> Option<BinaryHint> {
+    if count >= CONTROL_MIN && count * 100 > total * CONTROL_PERCENT {
+        Some(BinaryHint::Controls { count, total })
+    } else {
+        None
+    }
+}
+
+/// Judge whether bytes are text, without decoding them.
+///
+/// `enc` is the encoding known *before* decoding, and only UTF-16 changes the
+/// reading — but it changes it completely. Every other ASCII byte of UTF-16
+/// text is a NUL, so a byte-oriented test rejects every UTF-16 file; and a
+/// binary file that happens to begin `FF FE` is taken for UTF-16, so a test
+/// that simply exempts UTF-16 lets it through. That exemption is what the
+/// previous NUL-only check did, and it is why this reads code units instead.
+pub fn sniff_binary(raw: &[u8], enc: &'static Encoding) -> Option<BinaryHint> {
+    let window = &raw[..raw.len().min(SNIFF_WINDOW)];
+    if enc == UTF_16LE || enc == UTF_16BE {
+        sniff_utf16(window, enc == UTF_16BE)
+    } else {
+        sniff_bytes(window)
+    }
+}
+
+/// How many byte pairs the BOM-less-UTF-16 check looks at, and the share of
+/// them that must show the alternating NUL for it to say so.
+const UTF16_PROBE_PAIRS: usize = 128;
+const UTF16_PROBE_PERCENT: usize = 80;
+
+/// Whether a NUL-bearing prefix is really UTF-16 that nothing declared.
+///
+/// Worth separating from plain binary because it is the one case with a fix
+/// rather than an override: the file *is* text, and `--encoding utf-16le`
+/// reads it. Detection cannot find it unaided — chardetng does not guess
+/// UTF-16, so a BOM-less UTF-16 file is guessed as some single-byte encoding
+/// and decodes to text interleaved with NULs.
+///
+/// The test is the alternating NUL itself. One half of each pair must be NUL
+/// far more often than not, and the other half never, which ordinary binary
+/// data does not manage for long.
+fn utf16_without_bom(window: &[u8]) -> Option<BinaryHint> {
+    let pairs = window.chunks_exact(2).take(UTF16_PROBE_PAIRS);
+    let (mut le, mut be, mut n) = (0usize, 0usize, 0usize);
+    for pair in pairs {
+        n += 1;
+        match (pair[0] == 0, pair[1] == 0) {
+            // A NUL in both halves is U+0000, which is not text in any
+            // encoding, so it counts for neither reading.
+            (true, true) => {}
+            (false, true) => le += 1,
+            (true, false) => be += 1,
+            (false, false) => {}
+        }
+    }
+    if n < 2 {
+        return None;
+    }
+    let threshold = n * UTF16_PROBE_PERCENT / 100;
+    if le > threshold && be == 0 {
+        Some(BinaryHint::Utf16NoBom { be: false })
+    } else if be > threshold && le == 0 {
+        Some(BinaryHint::Utf16NoBom { be: true })
+    } else {
+        None
+    }
+}
+
+fn sniff_bytes(window: &[u8]) -> Option<BinaryHint> {
+    if let Some(offset) = window.iter().position(|&b| b == 0) {
+        return Some(utf16_without_bom(window).unwrap_or(BinaryHint::Nul { offset }));
+    }
+    let count = window
+        .iter()
+        .filter(|&&b| is_stray_control(u32::from(b)))
+        .count();
+    control_verdict(count, window.len())
+}
+
+/// The UTF-16 reading. Stray controls are a much weaker signal here — random
+/// data lands on a control unit only about once in 2400 units, where it lands
+/// on a surrogate about once in 32 — so the decisive test is pairing: a lone
+/// surrogate cannot occur in well-formed UTF-16, and binary data read as
+/// UTF-16 produces one within a few hundred units with near certainty.
+fn sniff_utf16(window: &[u8], be: bool) -> Option<BinaryHint> {
+    let units: Vec<u16> = window
+        .chunks_exact(2)
+        .map(|p| {
+            if be {
+                u16::from_be_bytes([p[0], p[1]])
+            } else {
+                u16::from_le_bytes([p[0], p[1]])
+            }
+        })
+        .collect();
+
+    let mut controls = 0usize;
+    let mut i = 0usize;
+    while i < units.len() {
+        let unit = units[i];
+        if unit == 0 {
+            return Some(BinaryHint::Nul { offset: i * 2 });
+        }
+        if (0xD800..=0xDBFF).contains(&unit) {
+            // A high surrogate must be followed by a low one. A high surrogate
+            // in the final position of the window is not evidence of anything:
+            // its partner may simply sit past the prefix we read.
+            match units.get(i + 1) {
+                Some(next) if (0xDC00..=0xDFFF).contains(next) => {
+                    i += 2;
+                    continue;
+                }
+                Some(_) => return Some(BinaryHint::Surrogate { offset: i * 2 }),
+                None => break,
+            }
+        }
+        if (0xDC00..=0xDFFF).contains(&unit) {
+            // A low surrogate reached here was not consumed as the second half
+            // of a pair, so it stands alone.
+            return Some(BinaryHint::Surrogate { offset: i * 2 });
+        }
+        if is_stray_control(u32::from(unit)) {
+            controls += 1;
+        }
+        i += 1;
+    }
+    control_verdict(controls, units.len())
+}
+
 /// A replacement of `text[start..end]` (UTF-8 offsets into the decoded text).
 #[derive(Debug, Clone)]
 pub struct Edit {
@@ -97,13 +336,20 @@ pub struct Document {
     pub had_decode_errors: bool,
     /// Re-encoding the decoded text reproduces the original bytes exactly.
     pub roundtrip: bool,
+    /// Why the file does not look like text, if it does not. Only ever `Some`
+    /// on a document loaded under `BinaryPolicy::Allow`.
+    pub binary: Option<BinaryHint>,
     map: Option<EncodedMap>,
     line_index: LineIndex,
 }
 
 impl Document {
     /// Read a file from disk. `encoding` overrides detection.
-    pub fn load(path: &Path, encoding: Option<ForcedEncoding>) -> Result<Document> {
+    pub fn load(
+        path: &Path,
+        encoding: Option<ForcedEncoding>,
+        binary: BinaryPolicy,
+    ) -> Result<Document> {
         let (raw, existed) = match fs::read(path) {
             Ok(bytes) => (bytes, true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -115,6 +361,7 @@ impl Document {
             }
             Err(e) => return Err(AppError::from(e)),
         };
+        gate_binary(path, &raw, encoding, binary)?;
         Ok(Document::from_bytes(
             path.to_path_buf(),
             raw,
@@ -124,14 +371,21 @@ impl Document {
     }
 
     /// Load a file that is allowed to be missing (for `write` / `create`).
-    pub fn load_or_empty(path: &Path, encoding: Option<ForcedEncoding>) -> Result<Document> {
+    pub fn load_or_empty(
+        path: &Path,
+        encoding: Option<ForcedEncoding>,
+        binary: BinaryPolicy,
+    ) -> Result<Document> {
         match fs::read(path) {
-            Ok(bytes) => Ok(Document::from_bytes(
-                path.to_path_buf(),
-                bytes,
-                encoding,
-                true,
-            )),
+            Ok(bytes) => {
+                gate_binary(path, &bytes, encoding, binary)?;
+                Ok(Document::from_bytes(
+                    path.to_path_buf(),
+                    bytes,
+                    encoding,
+                    true,
+                ))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Document::from_bytes(
                 path.to_path_buf(),
                 Vec::new(),
@@ -203,6 +457,7 @@ impl Document {
         let line_index = LineIndex::build(&decoded);
 
         Document {
+            binary: sniff_binary(&raw, encoding),
             path,
             raw,
             bom,
@@ -226,19 +481,26 @@ impl Document {
         self.bom.map(|b| b.len()).unwrap_or(0)
     }
 
-    /// True if the raw bytes contain a NUL, which usually means the file is not
-    /// text at all (UTF-16 excepted, where NULs are normal).
+    /// True if the file does not look like text. See [`sniff_binary`].
     pub fn looks_binary(&self) -> bool {
-        if self.encoding == encoding_rs::UTF_16LE || self.encoding == encoding_rs::UTF_16BE {
-            return false;
-        }
-        self.raw.contains(&0)
+        self.binary.is_some()
     }
 
     /// Mojibake-shaped sequences in the decoded text, if any. Computed on
     /// demand: only `info` and the write path ask, so the read-only commands
     /// should not pay for another pass over the text.
+    ///
+    /// Never reported for a file that is not text. The shape is two ordinary
+    /// bytes in sequence, so blobs turn it up constantly by chance — a real
+    /// `/bin/ls` yields 93 of them, `libc.so.6` 1581 — and the warning it
+    /// drives tells the reader to report damaged text rather than hand-fix it,
+    /// which is not advice about an ELF file. The binary verdict already says
+    /// the decoded reading means nothing; a second warning drawn from that
+    /// same reading adds no information and contradicts the first.
     pub fn mojibake(&self) -> Option<MojibakeHint> {
+        if self.binary.is_some() {
+            return None;
+        }
         scan_mojibake(&self.text)
     }
 
@@ -421,6 +683,49 @@ impl Document {
     }
 }
 
+/// The encoding known before anything is decoded: whatever the caller forced,
+/// else whatever a BOM declares. That is all the sniff needs, because the only
+/// distinction it draws is UTF-16 against everything else, and a BOM-less
+/// UTF-16 file is not a case that arises — chardetng never guesses UTF-16, so
+/// full detection would reach the same branch this does.
+fn early_encoding(raw: &[u8], forced: Option<ForcedEncoding>) -> &'static Encoding {
+    forced
+        .map(|f| f.encoding)
+        .or_else(|| sniff_bom(raw).map(|b| b.encoding()))
+        .unwrap_or(UTF_8)
+}
+
+/// Refuse a file that does not look like text, before it is decoded.
+///
+/// This guards reading as well as writing. Writing a binary file is the
+/// obvious hazard, but it is the better defended one: an edit only reaches the
+/// bytes through the round-trip check, which most binaries fail. Reading is
+/// the accident that actually happens — a glob that catches a `.png`, and
+/// `view` pipes NULs and escape sequences into a terminal or an agent's
+/// context, having reported nothing wrong.
+fn gate_binary(
+    path: &Path,
+    raw: &[u8],
+    forced: Option<ForcedEncoding>,
+    policy: BinaryPolicy,
+) -> Result<()> {
+    if policy == BinaryPolicy::Allow {
+        return Ok(());
+    }
+    let Some(hint) = sniff_binary(raw, early_encoding(raw, forced)) else {
+        return Ok(());
+    };
+    Err(AppError::new(
+        ErrorKind::Encoding,
+        format!(
+            "{} does not look like a text file: {}",
+            path.display(),
+            hint.describe()
+        ),
+    )
+    .with_hint(hint.refusal_hint()))
+}
+
 fn validate_edits(edits: &mut [Edit], text_len: usize) -> Result<()> {
     edits.sort_by_key(|e| (e.start, e.end));
     let mut prev_end = 0usize;
@@ -541,6 +846,100 @@ mod tests {
             enc.map(ForcedEncoding::flag),
             true,
         )
+    }
+
+    /// Deterministic stand-in for high-entropy data: a linear congruential
+    /// sequence, so the test does not depend on a random source.
+    fn pseudo_random(n: usize) -> Vec<u8> {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plain_text_is_not_binary() {
+        assert_eq!(sniff_binary("café\nrésumé\n".as_bytes(), UTF_8), None);
+        assert_eq!(sniff_binary(b"caf\xE9\r\n\ttabbed\x0C\n", UTF_8), None);
+        assert_eq!(sniff_binary(b"", UTF_8), None);
+    }
+
+    #[test]
+    fn a_nul_is_binary_and_says_where() {
+        assert_eq!(
+            sniff_binary(b"abc\x00def", UTF_8),
+            Some(BinaryHint::Nul { offset: 3 })
+        );
+    }
+
+    /// The gap the previous NUL-only check left: high-entropy data that
+    /// happens to carry no NUL in its first 8 KiB sailed straight through.
+    #[test]
+    fn binary_without_a_nul_is_still_binary() {
+        let data: Vec<u8> = pseudo_random(4000)
+            .into_iter()
+            .filter(|&b| b != 0)
+            .collect();
+        assert!(matches!(
+            sniff_binary(&data, UTF_8),
+            Some(BinaryHint::Controls { .. })
+        ));
+    }
+
+    /// A stray control or two does not condemn a file; ratio and count both
+    /// have to clear their thresholds.
+    #[test]
+    fn a_few_stray_controls_are_tolerated() {
+        let mut text = b"a normal line of prose, long enough to dilute the controls\n".to_vec();
+        text.extend_from_slice(b"\x01\x02");
+        assert_eq!(sniff_binary(&text, UTF_8), None);
+    }
+
+    #[test]
+    fn utf16_text_is_not_binary() {
+        let bytes: Vec<u8> = "héllo wörld\n"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        assert_eq!(sniff_binary(&bytes, UTF_16LE), None);
+    }
+
+    /// The other half of the old gap: UTF-16 was exempted wholesale, so a
+    /// binary file beginning `FF FE` was declared text without being looked at.
+    #[test]
+    fn binary_read_as_utf16_is_caught_by_pairing() {
+        let data = pseudo_random(2000);
+        assert!(matches!(
+            sniff_binary(&data, UTF_16LE),
+            Some(BinaryHint::Surrogate { .. })
+        ));
+    }
+
+    /// BOM-less UTF-16 is text, not binary, and saying so is what turns the
+    /// refusal into a fixable one.
+    #[test]
+    fn bom_less_utf16_is_named_as_such() {
+        let le: Vec<u8> = "hello world, a line of text\n"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        assert_eq!(
+            sniff_binary(&le, UTF_8),
+            Some(BinaryHint::Utf16NoBom { be: false })
+        );
+        let be: Vec<u8> = "hello world, a line of text\n"
+            .encode_utf16()
+            .flat_map(|u| u.to_be_bytes())
+            .collect();
+        assert_eq!(
+            sniff_binary(&be, UTF_8),
+            Some(BinaryHint::Utf16NoBom { be: true })
+        );
     }
 
     #[test]
