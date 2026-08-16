@@ -393,6 +393,10 @@ pub struct GuideArgs {
     /// List the available topics
     #[arg(long, short = 'l', conflicts_with = "topic")]
     pub list: bool,
+
+    /// Print the manual as Markdown rather than as terminal text
+    #[arg(long, short = 'm', conflicts_with = "list")]
+    pub markdown: bool,
 }
 
 #[derive(Args, Debug)]

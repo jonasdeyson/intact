@@ -2070,6 +2070,62 @@ fn guide_serves_the_whole_manual() {
     assert_eq!(code(&out), 2);
 }
 
+/// The manual is one source rendered two ways. This checks the Markdown way
+/// carries the same content as the terminal one and is structurally sound —
+/// MANUAL.md is this output, and CI only checks that the file matches the
+/// binary, not that either is any good.
+#[test]
+fn guide_renders_the_same_manual_as_markdown() {
+    let all = stdout(&run(&["guide", "--markdown"]));
+    assert!(all.starts_with("# intact — full manual"));
+
+    // Every topic is present as a real heading rather than fenced text.
+    for topic in ["overview", "encoding", "exit-codes", "batch", "recipes"] {
+        assert!(
+            all.contains(&format!("*`intact guide {topic}`*")),
+            "markdown manual omits `{topic}`"
+        );
+    }
+
+    // Fences have to pair up, or the rest of the file renders as code.
+    let fences = all.lines().filter(|l| l.starts_with("```")).count();
+    assert_eq!(
+        fences % 2,
+        0,
+        "unbalanced code fences in the markdown manual"
+    );
+
+    // Structure that only the block renderer can produce.
+    assert!(
+        all.contains("| Code | Meaning |"),
+        "exit codes are not a table"
+    );
+    assert!(
+        all.contains("### Detection order"),
+        "no markdown subheading"
+    );
+    assert!(
+        !all.contains("{#"),
+        "raw anchor syntax leaked into the output"
+    );
+
+    // Both renderings say the same things, whatever the markup around them.
+    for topic in ["overview", "exit-codes"] {
+        let one = stdout(&run(&["guide", "--markdown", topic]));
+        let plain = stdout(&run(&["guide", topic]));
+        for needle in ["intact", "file"] {
+            assert!(one.contains(needle) && plain.contains(needle));
+        }
+        assert!(
+            one.len() > 200,
+            "`guide --markdown {topic}` is suspiciously short"
+        );
+    }
+
+    // --markdown is about rendering, and has nothing to say about the index.
+    assert_eq!(code(&run(&["guide", "--markdown", "--list"])), 2);
+}
+
 #[test]
 fn guide_is_available_as_json() {
     let out = run(&["--json", "guide", "ranges"]);

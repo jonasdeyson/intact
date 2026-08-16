@@ -74,6 +74,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guess it, so it used to be a dead end; the refusal now names the flag that
   reads it (`pass --encoding utf-16le ...`).
 
+### Added
+
+- `intact guide --markdown` prints the manual as Markdown rather than as
+  terminal text, for the whole manual or for one topic. `MANUAL.md` is exactly
+  this output and nothing else, so `scripts/gen-manual.sh` is now a single
+  redirect rather than a heredoc wrapping the text in a code fence.
+
+### Changed
+
+- The manual's source is structured. A section body used to be one blob of
+  pre-formatted text, which meant `MANUAL.md` could only ever be that blob
+  fenced whole — a Markdown file containing no Markdown. Bodies are now lists
+  of typed blocks (prose, code, headings, lists, tables), and the terminal
+  manual and `MANUAL.md` are two renderings of the one source, so neither can
+  drift from the other.
+- `MANUAL.md` is consequently real Markdown: headings, tables where the manual
+  had aligned columns, and code fences tagged `bash`, `json` or `text`. Section
+  headings are sentence case there — `## Encodings`, not `## ENCODINGS` — so
+  deep links into the file work (`MANUAL.md#encodings`), while the terminal
+  manual keeps the capitals that are how a heading announces itself with no
+  other means to.
+- Aligned two-column lists — exit codes, range syntax, `batch` op fields, the
+  `--text`, `--find`/`--with` and `--eol` flags — gained a header row where the
+  columns were not self-evident from their contents. The command list in the
+  overview keeps none, since its captions already name them.
+- The encoding label list is a block of the encoding topic rather than a special
+  case in the renderer, which used to append it to one section by name, and it
+  flows into columns instead of running one label per line.
+
+### Fixed
+
+- Where a manual section opened with an indented example, its first line
+  rendered flush-left while the lines below it kept their indent — visible in
+  `intact guide batch`. Rust's `\`-newline string escape strips the leading
+  whitespace of the line that follows it, and every section body began with one.
+  Code samples now take their indentation from the renderer, so it cannot recur.
+
 ## [0.3.0] - 2026-08-15
 
 ### Added

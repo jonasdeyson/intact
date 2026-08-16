@@ -92,8 +92,10 @@ fn run(cli: &Cli) -> Result<i32> {
 fn cmd_guide(cli: &Cli, args: &cli::GuideArgs) -> Result<i32> {
     let text = match (&args.topic, args.list) {
         (_, true) => manual::topic_list(),
+        (None, false) if args.markdown => manual::render_all_markdown(),
         (None, false) => manual::render_all(),
         (Some(topic), false) => match manual::find(topic) {
+            Some(section) if args.markdown => manual::render_one_markdown(section),
             Some(section) => manual::render_one(section),
             None => {
                 return Err(AppError::new(

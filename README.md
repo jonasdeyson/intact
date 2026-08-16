@@ -54,9 +54,10 @@ binary and it can discover everything from `--help`:
 ```console
 intact --help              # commands, global flags, exit codes, examples
 intact COMMAND --help      # one command, with examples of its own
-intact guide               # the complete manual (same text as MANUAL.md)
+intact guide               # the complete manual (the content of MANUAL.md)
 intact guide --list        # its topics
 intact guide encoding      # one topic, e.g. encoding, ranges, batch, recipes
+intact guide --markdown    # the same manual as Markdown — this is MANUAL.md
 ```
 
 `--json` works on `guide` too, so the manual can be pulled in structured form.
@@ -189,5 +190,5 @@ Labels follow the [WHATWG Encoding Standard](https://encoding.spec.whatwg.org/):
 `shift_jis`, `iso-2022-jp`, `euc-kr` and their usual aliases — run `intact
 guide encoding` for the complete list this build accepts. What happens when a
 file doesn't round-trip, when text can't be represented, or when detection
-guesses wrong is covered in the `ENCODING` section of [MANUAL.md](MANUAL.md)
+guesses wrong is covered in [Encodings](MANUAL.md#encodings) in the manual
 (same content as `intact guide encoding`).
