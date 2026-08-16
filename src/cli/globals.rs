@@ -72,6 +72,10 @@ const GLOBALS_BY_COMMAND: &[(&str, &[&[&str]])] = &[
     // Deletes nothing but whole lines: no new text is encoded, and there is no
     // --text to unescape. --strict-eol still guards the write.
     ("delete",        &[FILE, WRITE, BACKUP, GUARD, MANDATE]),
+    // Moves the file's own lines, so nothing new is encoded either - but it can
+    // have to add a terminator to a block that had none, which is what --eol
+    // decides. Same groups as `delete`.
+    ("move-lines",    &[FILE, WRITE, BACKUP, GUARD, MANDATE]),
     // The file cannot already exist, so there is nothing to back up, nothing
     // whose encoding was guessed, and no existing line endings to enforce.
     ("create",        &[FILE, WRITE, ENCODE, EOL, ESCAPES]),

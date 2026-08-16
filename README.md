@@ -159,6 +159,7 @@ intact append  FILE --text TEXT
 intact prepend FILE --text TEXT
 intact delete  FILE --lines 10:20
 intact replace-lines FILE --lines 5:7 --text TEXT
+intact move-lines FILE --lines 40:52 --after 12  # --before N, or --by -3
 intact write   FILE --text TEXT                 # replace whole contents
 intact create  FILE --text TEXT                 # fails if the file exists
 intact convert FILE --to utf-8
@@ -191,6 +192,39 @@ intact replace app.py --regex --all \
 unless `--no-expand` is given. Without `--regex` the needle is literal, and its
 `\n` are rewritten to the file's line ending so a literal multi-line search
 works on CRLF files too.
+
+#### `move-lines` in detail
+
+`--lines` picks the block; `--after N`, `--before N` or `--by K` says where it
+goes.
+
+```console
+intact move-lines app.py --lines 40:52 --after 12    # below line 12
+intact move-lines app.py --lines 40:52 --before 1    # to the top
+intact move-lines app.py --lines 40:52 --after $     # to the end
+intact move-lines app.py --lines 7:9 --by -3         # up three lines
+intact move-lines app.py --lines 7 --by 5            # down five lines
+```
+
+`--after` and `--before` name a line of the file **as it is numbered now** —
+the numbers `view --number` prints — not the numbering left behind once the
+block has been lifted out. `--by K` is the same move stated relatively: the
+block's first line ends up at line `N + K`, which is the same arithmetic
+whichever direction it travels.
+
+A destination inside the block is a usage error (exit 2), since a block cannot
+be moved into itself, and a `--by` that would carry the block past either end of
+the file is a range error (exit 6) rather than a clamp. A destination naming
+where the block already is writes nothing and reports `unchanged`.
+
+The moved lines are spliced, not re-encoded from text you retyped, so this is
+the safe way to reorder a file: `delete` followed by `insert` would take the
+block back out through your terminal and your shell's quoting first. They keep
+their own line terminators, and the file keeps its final newline — or its lack
+of one — whichever end the block came from.
+
+`move-lines` is addressed by line, like `delete` and `replace-lines`; there is
+no `--find` form. Locate the block first with `search`, then move it.
 
 #### Line numbers and ranges
 
@@ -262,8 +296,9 @@ earlier ones, so line numbers refer to the state at that step.
 A bare JSON array works too. Recognised ops: `replace` (`find`, `with`,
 `regex`, `ignore_case`, `all`, `occurrence`, `expect`, `lines`, `no_expand`),
 `insert` (`line` or `after`, `text`), `append`, `prepend`, `delete` (`lines`),
-`replace-lines` (`lines`, `text`), `write` (`text`). Use `--script -` to read
-the script from stdin.
+`replace-lines` (`lines`, `text`), `move-lines` (`lines`, and one of `after`,
+`before`, `by`), `write` (`text`). Use `--script -` to read the script from
+stdin.
 
 Every op also takes a `file`, which is how one command edits several files. The
 `FILE` argument is the default for ops that omit it, and can be left out

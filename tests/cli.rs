@@ -208,6 +208,194 @@ fn delete_and_replace_lines() {
 }
 
 #[test]
+fn move_lines_by_every_destination_form() {
+    let sb = Sandbox::new("move");
+    let f = sb.file("a.txt", b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n");
+    let p = f.to_str().unwrap();
+    let reset = || std::fs::write(&f, b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n").unwrap();
+
+    // Destinations name lines as the file is numbered *now*, so --after 7 puts
+    // the block below the line that currently reads "7".
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "3:4", "--after", "7"])),
+        0
+    );
+    assert_eq!(read(&f), b"1\n2\n5\n6\n7\n3\n4\n8\n9\n10\n".to_vec());
+
+    reset();
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "7:8", "--before", "3"])),
+        0
+    );
+    assert_eq!(read(&f), b"1\n2\n7\n8\n3\n4\n5\n6\n9\n10\n".to_vec());
+
+    // --by K lands the block's first line at a + K either way round.
+    reset();
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "1:2", "--by", "5"])),
+        0
+    );
+    assert_eq!(read(&f), b"3\n4\n5\n6\n7\n1\n2\n8\n9\n10\n".to_vec());
+
+    reset();
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "7", "--by", "-3"])),
+        0
+    );
+    assert_eq!(read(&f), b"1\n2\n3\n7\n4\n5\n6\n8\n9\n10\n".to_vec());
+
+    // The two ends of the file: --after $ and --before 1.
+    reset();
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "1:2", "--after", "$"])),
+        0
+    );
+    assert_eq!(read(&f), b"3\n4\n5\n6\n7\n8\n9\n10\n1\n2\n".to_vec());
+
+    reset();
+    assert_eq!(
+        code(&run(&[
+            "move-lines",
+            p,
+            "--lines",
+            "-2:-1",
+            "--before",
+            "1"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"9\n10\n1\n2\n3\n4\n5\n6\n7\n8\n".to_vec());
+}
+
+#[test]
+fn move_lines_refuses_a_destination_it_cannot_honour() {
+    let sb = Sandbox::new("movebad");
+    let f = sb.file("a.txt", b"1\n2\n3\n4\n5\n");
+    let p = f.to_str().unwrap();
+
+    // Inside the block: a block cannot be moved into itself.
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "2:4", "--after", "3"])),
+        2
+    );
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "2:4", "--before", "3"])),
+        2
+    );
+    // The whole file has nowhere to go.
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "1:$", "--after", "2"])),
+        2
+    );
+    // --by past either end is a range error, not a clamp.
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "2:4", "--by", "9"])),
+        6
+    );
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "2:4", "--by", "-5"])),
+        6
+    );
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "9", "--after", "1"])),
+        6
+    );
+    // A destination is required, and only one of them.
+    assert_eq!(code(&run(&["move-lines", p, "--lines", "2"])), 2);
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "2", "--by", "0"])),
+        2
+    );
+    assert_eq!(
+        code(&run(&[
+            "move-lines",
+            p,
+            "--lines",
+            "2",
+            "--after",
+            "4",
+            "--by",
+            "1"
+        ])),
+        2
+    );
+    // Every one of those wrote nothing.
+    assert_eq!(read(&f), b"1\n2\n3\n4\n5\n".to_vec());
+
+    // Naming where the block already is changes nothing, and is not an error:
+    // a script that computes a destination may arrive at the current one.
+    let out = run(&["move-lines", p, "--lines", "2:4", "--after", "4"]);
+    assert_eq!(code(&out), 0);
+    assert!(stdout(&out).contains("unchanged"), "{}", stdout(&out));
+    assert_eq!(read(&f), b"1\n2\n3\n4\n5\n".to_vec());
+}
+
+#[test]
+fn move_lines_keeps_encoding_endings_and_final_newline() {
+    let sb = Sandbox::new("movekeep");
+
+    // The moved bytes are spliced, not re-encoded from scratch.
+    let f = sb.file("latin1.txt", b"caf\xE9\nr\xE9sum\xE9\nx\n");
+    assert_eq!(
+        code(&run(&[
+            "move-lines",
+            f.to_str().unwrap(),
+            "--lines",
+            "1",
+            "--after",
+            "2"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"r\xE9sum\xE9\ncaf\xE9\nx\n".to_vec());
+
+    let f = sb.file("crlf.txt", b"1\r\n2\r\n3\r\n4\r\n");
+    assert_eq!(
+        code(&run(&[
+            "move-lines",
+            f.to_str().unwrap(),
+            "--lines",
+            "1",
+            "--after",
+            "3"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"2\r\n3\r\n1\r\n4\r\n".to_vec());
+
+    // A file with no final newline keeps having none, whichever end the block
+    // is lifted from: the unterminated last line takes a terminator with it on
+    // the way up, and gives its own away on the way down.
+    let f = sb.file("tail.txt", b"a\nb\nc");
+    assert_eq!(
+        code(&run(&[
+            "move-lines",
+            f.to_str().unwrap(),
+            "--lines",
+            "$",
+            "--before",
+            "1"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"c\na\nb".to_vec());
+
+    let f = sb.file("head.txt", b"a\nb\nc");
+    assert_eq!(
+        code(&run(&[
+            "move-lines",
+            f.to_str().unwrap(),
+            "--lines",
+            "1",
+            "--after",
+            "$"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"b\nc\na".to_vec());
+}
+
+#[test]
 fn file_without_trailing_newline_is_respected() {
     let sb = Sandbox::new("notrailing");
     let f = sb.file("a.txt", b"one\ntwo");
@@ -911,6 +1099,29 @@ fn batch_applies_operations_atomically() {
         read(&f),
         b"d\xE9but\nth\xE9\nr\xE9sum\xE9\n\xE0 demain\n".to_vec()
     );
+}
+
+#[test]
+fn batch_moves_lines_against_the_running_state() {
+    let sb = Sandbox::new("batchmove");
+    let f = sb.file("a.txt", b"1\n2\n3\n4\n5\n");
+    let script = sb.file(
+        "script.json",
+        r#"[{"op":"move-lines","lines":"1:2","after":"$"},
+            {"op":"move-lines","lines":"$","by":-2},
+            {"op":"delete","lines":1}]"#
+            .as_bytes(),
+    );
+
+    let out = run(&[
+        "batch",
+        f.to_str().unwrap(),
+        "--script",
+        script.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    // 1 2 3 4 5 -> 3 4 5 1 2 -> 3 4 2 5 1 -> 4 2 5 1
+    assert_eq!(read(&f), b"4\n2\n5\n1\n".to_vec());
 }
 
 #[test]
@@ -1787,6 +1998,7 @@ fn every_command_has_working_help() {
         "prepend",
         "delete",
         "replace-lines",
+        "move-lines",
         "write",
         "create",
         "convert",

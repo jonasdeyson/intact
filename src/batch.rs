@@ -82,6 +82,18 @@ enum BatchOp {
         lines: Value,
         text: String,
     },
+    #[serde(rename = "move-lines")]
+    MoveLines {
+        #[serde(default)]
+        file: Option<PathBuf>,
+        lines: Value,
+        #[serde(default)]
+        after: Option<Value>,
+        #[serde(default)]
+        before: Option<Value>,
+        #[serde(default)]
+        by: Option<i64>,
+    },
     Write {
         #[serde(default)]
         file: Option<PathBuf>,
@@ -98,6 +110,7 @@ impl BatchOp {
             | BatchOp::Prepend { file, .. }
             | BatchOp::Delete { file, .. }
             | BatchOp::ReplaceLines { file, .. }
+            | BatchOp::MoveLines { file, .. }
             | BatchOp::Write { file, .. } => file,
         };
         file.as_deref()
@@ -369,6 +382,22 @@ fn apply_batch_op(doc: &Document, op: &BatchOp, ctx: Ctx) -> Result<OpOutcome> {
                 text: no_text,
             };
             ops::replace_lines(doc, &args, text, ctx)
+        }
+        BatchOp::MoveLines {
+            file: _,
+            lines: range,
+            after,
+            before,
+            by,
+        } => {
+            let args = cli::MoveLinesArgs {
+                file: doc.path.clone(),
+                lines: as_range(range)?,
+                after: after.as_ref().map(as_spec).transpose()?,
+                before: before.as_ref().map(as_spec).transpose()?,
+                by: *by,
+            };
+            ops::move_lines(doc, &args, ctx)
         }
         BatchOp::Write { file: _, text } => ops::write_all(doc, text, ctx, true),
     }

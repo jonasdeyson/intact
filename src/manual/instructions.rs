@@ -196,6 +196,7 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
              {cmd} insert FILE --line N --text TEXT\n\
              {cmd} delete FILE --lines 10:20\n\
              {cmd} replace-lines FILE --lines 5:7 --text TEXT\n\
+             {cmd} move-lines FILE --lines 40:52 --after 12      # relocate a block\n\
              {cmd} batch FILE --script ops.json                  # several edits at once\n\
              ```\n\n\
              **When a file needs more than one change, use `batch`** rather than a run of \
@@ -241,6 +242,7 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
          {cmd} prepend FILE --text TEXT\n\
          {cmd} delete FILE --lines 10:20\n\
          {cmd} replace-lines FILE --lines 5:7 --text-file /tmp/block.txt\n\
+         {cmd} move-lines FILE --lines 40:52 --after 12  # --before N, or --by -3\n\
          {cmd} write FILE --text TEXT                   # replace whole contents\n\
          {cmd} create FILE --text TEXT [--parents]      # fails if the file exists\n\
          {cmd} convert FILE --to utf-8                  # migrate the encoding\n\
@@ -266,7 +268,8 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
          ```\n\n\
          Ops: `replace` (find, with, regex, ignore_case, all, occurrence, expect, lines, \
          no_expand), `insert` (line or after, text), `append`, `prepend` (text), `delete` \
-         (lines), `replace-lines` (lines, text), `write` (text) — plus `file` on any of them. \
+         (lines), `replace-lines` (lines, text), `move-lines` (lines, and one of after, before, \
+         by), `write` (text) — plus `file` on any of them. \
          Run `{cmd} guide batch` for the full schema.\n\n\
          {sub} How to make an edit\n\n\
          1. Read the region you are about to change: `{cmd} view FILE --lines A:B --number`.\n\

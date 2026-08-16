@@ -38,7 +38,7 @@ TEXT INPUT:
   interprets \\n, \\t, \\uXXXX in --text, --find and --with - and in text read
   from a file - so multi-line content fits in one argument.
 
-LINE RANGES (--lines, --line, --after), 1-based and inclusive:
+LINE RANGES (--lines, --line, --after, --before), 1-based and inclusive:
   7  5:9  5:  :9  $  3:$  -1  -3:-1
 
 EXAMPLES:
@@ -50,6 +50,7 @@ EXAMPLES:
   intact insert README.md --line 3 --text 'a new line'
   intact delete legacy.txt --lines 10:20
   intact replace-lines main.rs --lines 5:7 --text-file /tmp/block.txt
+  intact move-lines main.rs --lines 40:52 --after 12
   intact convert legacy.txt --to utf-8
   intact --show-diff replace app.py --find x --with y   # global flags first
   intact batch --script ops.json                        # many edits, many files
@@ -261,6 +262,29 @@ pub enum Command {
                       intact replace-lines app.py --lines 3:$ --text 'tail'\n"
     )]
     ReplaceLines(ReplaceLinesArgs),
+
+    /// Move a range of lines somewhere else in the same file
+    #[command(
+        name = "move-lines",
+        long_about = "Move a range of lines somewhere else in the same file.\n\n\
+                      --lines picks the block; --after N, --before N or --by K says where it \
+                      goes. The destination is named in the file's CURRENT numbering - the \
+                      numbers `view --number` prints - not the numbering left behind once the \
+                      block has been lifted out. --by K is the same move stated relatively: the \
+                      block's first line ends up K lines further down (negative K moves it up).\n\n\
+                      A destination inside the block is a usage error, since a block cannot be \
+                      moved into itself; one that names where the block already is changes \
+                      nothing and reports `unchanged`. The moved lines keep their own line \
+                      terminators, and the file keeps its final newline - or its lack of one - \
+                      whichever end of the file the block came from.",
+        after_help = "EXAMPLES:\n  \
+                      intact move-lines app.py --lines 40:52 --after 12\n  \
+                      intact move-lines app.py --lines 40:52 --before 1    # to the top\n  \
+                      intact move-lines app.py --lines 40:52 --after $     # to the end\n  \
+                      intact move-lines app.py --lines 7 --by -3           # up three lines\n  \
+                      intact move-lines app.py --lines 7:9 --by 5          # down five lines\n"
+    )]
+    MoveLines(MoveLinesArgs),
 
     /// Replace the entire contents of a file, keeping its encoding
     #[command(
@@ -625,6 +649,44 @@ pub struct ReplaceLinesArgs {
 
     #[command(flatten)]
     pub text: TextSource,
+}
+
+/// A move has to say where the block goes, so the three destination forms are
+/// one required, mutually exclusive group - the same shape as `insert`'s
+/// `--line`/`--after`. (`batch` builds these args from JSON, which clap never
+/// sees, so `ops::move_lines` still checks for itself.)
+#[derive(Args, Debug)]
+#[command(group = ArgGroup::new("destination").required(true).args(["after", "before", "by"]))]
+pub struct MoveLinesArgs {
+    /// File to edit
+    pub file: PathBuf,
+
+    /// Lines to move, e.g. 5, 5:9, 3:$, -3:-1
+    #[arg(long, short = 'l', value_name = "RANGE", allow_hyphen_values = true)]
+    pub lines: LineRange,
+
+    /// Put the block after this line, numbered as the file is now
+    #[arg(long, short = 'a', value_name = "LINE", allow_hyphen_values = true)]
+    pub after: Option<LineSpec>,
+
+    /// Put the block before this line, numbered as the file is now (one past
+    /// the last line means the end of the file)
+    #[arg(long, short = 'b', value_name = "LINE", allow_hyphen_values = true)]
+    pub before: Option<LineSpec>,
+
+    /// Move the block this many lines down; a negative number moves it up
+    #[arg(long, value_name = "K", allow_hyphen_values = true, value_parser = nonzero)]
+    pub by: Option<i64>,
+}
+
+/// `--by 0` names no movement, exactly as `--occurrence 0` names no
+/// occurrence, so it is rejected as an argument rather than as a result.
+fn nonzero(value: &str) -> Result<i64, String> {
+    match value.parse::<i64>() {
+        Ok(0) => Err("0 moves the block nowhere; pass a non-zero number of lines".to_string()),
+        Ok(n) => Ok(n),
+        Err(_) => Err(format!("`{value}` is not a whole number")),
+    }
 }
 
 #[derive(Args, Debug)]

@@ -394,6 +394,7 @@ fn cmd_edit(cli: &Cli, forced: Option<ForcedEncoding>) -> Result<i32> {
         Command::Prepend(a) => (&a.file, "prepend", false),
         Command::Delete(a) => (&a.file, "delete", false),
         Command::ReplaceLines(a) => (&a.file, "replace-lines", false),
+        Command::MoveLines(a) => (&a.file, "move-lines", false),
         Command::Write(a) => (&a.file, "write", true),
         _ => unreachable!("cmd_edit called with a non-editing command"),
     };
@@ -454,6 +455,7 @@ fn cmd_edit(cli: &Cli, forced: Option<ForcedEncoding>) -> Result<i32> {
             let text = textsrc::resolve(&a.text, "replace-lines", cli.escapes)?;
             ops::replace_lines(&doc, a, &text, ctx)?
         }
+        Command::MoveLines(a) => ops::move_lines(&doc, a, ctx)?,
         Command::Write(a) => {
             let text = textsrc::resolve(&a.text, "write", cli.escapes)?;
             ensure_parent_dir(&a.file, a.parents)?;

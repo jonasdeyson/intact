@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [Unreleased]
 
+### Added
+
+- `intact move-lines FILE --lines RANGE` moves a block of lines elsewhere in the
+  same file. The destination is `--after N`, `--before N`, or `--by K` to shift
+  the block K lines down (negative K moves it up). `--after` and `--before` name
+  a line as the file is numbered now, not as it will be numbered once the block
+  has been lifted out of it; `--by K` puts the block's first line at `N + K`,
+  the same arithmetic whichever direction it travels. `--before` accepts one
+  past the last line, as `insert --line` does.
+- The moved lines are spliced rather than re-encoded, so reordering a file no
+  longer means `delete` plus `insert` with the block's text making a round trip
+  through the shell — which is exactly where a non-UTF-8 block gets damaged.
+  They keep their own line terminators, and the file keeps its final newline, or
+  its lack of one, whichever end the block was lifted from.
+- A destination inside the block is a usage error (exit 2); a `--by` that would
+  carry the block past either end of the file is a range error (exit 6) rather
+  than a clamp; a destination naming where the block already is writes nothing
+  and reports `unchanged`.
+- `batch` gains the matching `move-lines` op (`lines`, and one of `after`,
+  `before`, `by`).
+
 ### Changed
 
 - The binary guard now covers reading as well as writing. `view`, `search` and

@@ -43,6 +43,7 @@ COMMANDS
     prepend        add text at the start of the file
     delete         delete a line range
     replace-lines  replace a line range with new text
+    move-lines     move a line range elsewhere in the same file
     write          replace the entire contents, keeping the encoding
     create         create a new file, failing if it exists
     convert        re-encode the file into a different encoding
@@ -332,7 +333,7 @@ UTF-16 output always gets a BOM, since UTF-16 without one is undetectable.",
     Section {
         key: "ranges",
         title: "LINE NUMBERS AND RANGES",
-        summary: "the syntax accepted by --lines, --line and --after",
+        summary: "the syntax accepted by --lines, --line, --after and --before",
         body: "\
 Line numbers are 1-based. Ranges are inclusive at both ends.
 
@@ -347,15 +348,20 @@ Line numbers are 1-based. Ranges are inclusive at both ends.
 
 `:` is the only range separator.
 
---line and --after take a single position (7, $, -2); --lines takes a range.
+--line, --after and --before take a single position (7, $, -2); --lines takes a
+range.
 
-`insert --line N` accepts one past the last line, meaning \"start a new line at
-the end of the file\". `insert --after N` requires an existing line.
+`insert --line N` and `move-lines --before N` accept one past the last line,
+meaning \"start a new line at the end of the file\". `insert --after N` and
+`move-lines --after N` require an existing line.
 
 A range that runs backwards, or names a line beyond the end of the file, exits 6.
 
 Commands that accept --lines as a filter rather than a target — replace and
-search — restrict the operation to that region and leave the rest alone.",
+search — restrict the operation to that region and leave the rest alone.
+
+A destination named for `move-lines` is a line of the file as it is numbered
+now, not as it will be numbered once the block has been lifted out of it.",
     },
     Section {
         key: "text",
@@ -446,7 +452,9 @@ TRAILING NEWLINES
 append, prepend, write and create ensure the result ends with a line terminator;
 --no-trailing-newline turns that off. replace-lines keeps whatever the replaced
 region had, so replacing the last line of a file that lacks a final newline does
-not add one.",
+not add one. move-lines keeps it too, from either end: a block lifted from an
+unterminated last line takes the terminator above it along and gains one of its
+own, and a block landing after an unterminated last line gives its own up.",
     },
     Section {
         key: "exit-codes",
@@ -607,10 +615,11 @@ A bare JSON array works too. Fields per op:
   prepend        text
   delete         lines
   replace-lines  lines, text
+  move-lines     lines, and one of after, before or by
   write          text
 
-Every op also accepts \"file\". \"lines\" and \"line\" accept a number or any range
-string from the ranges topic. Unknown fields are rejected, so a typo fails
+Every op also accepts \"file\". \"lines\", \"line\", \"after\" and \"before\" accept a
+number or any range string from the ranges topic. Unknown fields are rejected, so a typo fails
 loudly instead of being ignored.
 
 Text in a script is UTF-8 JSON, with normal JSON escapes — use \\n for newlines
@@ -742,6 +751,23 @@ INSERT MULTI-LINE TEXT IN ONE ARGUMENT
 DELETE A FUNCTION BODY
 
   intact delete app.py --lines 120:145
+
+MOVE A BLOCK OF LINES
+
+  intact move-lines app.py --lines 40:52 --after 12    # below line 12
+  intact move-lines app.py --lines 40:52 --before 1    # to the top
+  intact move-lines app.py --lines 40:52 --after $     # to the end
+  intact move-lines app.py --lines 7:9 --by -3         # up three lines
+
+--after and --before name a line of the file as `view --number` shows it now.
+--by K is the same move stated relatively: the block's first line ends up K
+lines further down, or further up for a negative K.
+
+`move-lines` is addressed by line, like `delete` and `replace-lines`; there is
+no --find form. Find the block first, then move it:
+
+  intact search app.py --find 'def helper('   # app.py:40:1:def helper(x):
+  intact move-lines app.py --lines 40:52 --after 12
 
 REGEX WITH CAPTURE GROUPS
 

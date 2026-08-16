@@ -4,7 +4,9 @@
 use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 
-use crate::cli::{DeleteArgs, InsertArgs, ReplaceArgs, ReplaceLinesArgs, SearchArgs};
+use crate::cli::{
+    DeleteArgs, InsertArgs, MoveLinesArgs, ReplaceArgs, ReplaceLinesArgs, SearchArgs,
+};
 use crate::document::{Document, Edit};
 use crate::error::{AppError, ErrorKind, Result};
 use crate::lines::{self, Eol, EolMode, LineRange};
@@ -360,6 +362,177 @@ pub fn replace_lines(
         details: json!({ "from_line": a, "to_line": b, "lines_replaced": b - a + 1, "lines_written": new_lines }),
         edits: vec![Edit::new(start, end, block)],
     })
+}
+
+/// Move a block of lines somewhere else in the same file.
+///
+/// The destination is named in the file's *current* numbering — the numbers
+/// `view --number` prints — rather than the numbering the file is left with
+/// once the block has been lifted out of it. The alternative asks the caller to
+/// do that renumbering in their head before naming a line they can see, and to
+/// get a different answer depending on whether the block moves up or down.
+///
+/// The moved lines keep their own terminators. Nothing here is new text: the
+/// file's bytes are being permuted, so rewriting their line endings on the way
+/// past (what [`Ctx::shape`] would do) would change lines the caller only asked
+/// to relocate. The one terminator this can add — to a block lifted from an
+/// unterminated end of file — does go through `--eol`.
+pub fn move_lines(doc: &Document, args: &MoveLinesArgs, ctx: Ctx) -> Result<OpOutcome> {
+    let index = doc.lines();
+    let total = index.count();
+    let (a, b) = args.lines.resolve(total)?;
+    let count = b - a + 1;
+
+    if a == 1 && b == total {
+        return Err(AppError::new(
+            ErrorKind::Usage,
+            format!("lines {a}:{b} are the whole file; there is nowhere to move them"),
+        ));
+    }
+
+    // Every destination form collapses to an insertion gap: `gap` means "before
+    // line gap", running from 1 (the top of the file) to total + 1 (the end of
+    // it). Reducing the three of them to one number is what makes them
+    // comparable against the block below.
+    let gap = match (args.after, args.before, args.by) {
+        (Some(spec), None, None) => spec.resolve(total, total)? + 1,
+        // One past the last line is accepted here as it is for `insert --line`,
+        // and means the end of the file.
+        (None, Some(spec), None) => spec.resolve(total, total + 1)?,
+        (None, None, Some(k)) => shift_gap(k, a, b, total)?,
+        (None, None, None) => {
+            return Err(AppError::new(
+                ErrorKind::Usage,
+                "move-lines requires --after N, --before N or --by K",
+            ));
+        }
+        _ => {
+            return Err(AppError::new(
+                ErrorKind::Usage,
+                "--after, --before and --by are mutually exclusive",
+            ));
+        }
+    };
+
+    if gap > a && gap <= b {
+        return Err(AppError::new(
+            ErrorKind::Usage,
+            format!("the destination is inside lines {a}:{b}, the block being moved"),
+        )
+        .with_hint(format!(
+            "name a line outside {a}:{b} — the block cannot be moved into itself"
+        )));
+    }
+
+    let first = index.get(a).unwrap();
+    let last = index.get(b).unwrap();
+    let (block_start, block_end) = (first.start, last.end);
+
+    if gap == a || gap == b + 1 {
+        // The block is already there. Not an error: nothing about the request
+        // was ambiguous, and a script that computes a destination should be
+        // able to arrive at the current one without failing.
+        return Ok(OpOutcome {
+            summary: format!("line(s) {a}:{b} are already there; nothing moved"),
+            details: json!({
+                "from_line": a, "to_line": b, "lines_moved": 0, "at_line": a, "at_end_line": b,
+            }),
+            edits: Vec::new(),
+        });
+    }
+
+    let dest = match index.get(gap) {
+        Some(line) => line.start,
+        None => doc.text.len(),
+    };
+
+    let mut delete_from = block_start;
+    let mut block = doc.text[block_start..block_end].to_string();
+
+    // Two ends of one rule: the file keeps its final newline, or its lack of
+    // one, exactly as it had it.
+    if last.end == last.content_end {
+        // The block is the file's unterminated tail. Lifting it out would leave
+        // the line above it as a terminated last line, so that terminator goes
+        // with the block; the block gains one of its own, its destination being
+        // somewhere in the middle of the file.
+        //
+        // `a > 1` holds here: a block reaching line 1 as well as the last line
+        // is the whole file, refused above.
+        delete_from = index.get(a - 1).unwrap().content_end;
+        block.push_str(ctx.eol());
+    } else if dest == doc.text.len() && !lines::ends_with_eol(&doc.text) {
+        // Landing after a last line that has no terminator: it needs one before
+        // the block can follow it, and the block gives up its own so that the
+        // file still ends without one.
+        block.truncate(last.content_end - block_start);
+        block.insert_str(0, ctx.eol());
+    }
+
+    // Where the block ends up once the lines it was lifted from have closed up
+    // behind it. Moving up, the gap keeps its number; moving down, everything
+    // from the gap back to the block has shifted up by the block's length.
+    let at_line = if gap < a { gap } else { gap - count };
+
+    Ok(OpOutcome {
+        summary: format!(
+            "moved {count} line(s) from {a}:{b} to {at_line}:{}",
+            at_line + count - 1
+        ),
+        details: json!({
+            "from_line": a,
+            "to_line": b,
+            "lines_moved": count,
+            "at_line": at_line,
+            "at_end_line": at_line + count - 1,
+        }),
+        // Disjoint by construction: a destination between the two ends of the
+        // block was refused above, so `validate_edits` sorts these into a clean
+        // lift-and-drop whichever way the block travels.
+        edits: vec![
+            Edit::new(dest, dest, block),
+            Edit::new(delete_from, block_end, String::new()),
+        ],
+    })
+}
+
+/// `--by K` as an insertion gap. K counts lines in the file as it stands: the
+/// block's first line ends up at `a + K` once everything has closed up, which
+/// is the same number whichever direction it travelled.
+fn shift_gap(k: i64, a: usize, b: usize, total: usize) -> Result<usize> {
+    if k == 0 {
+        return Err(AppError::new(
+            ErrorKind::Usage,
+            "--by 0 moves the block nowhere",
+        ));
+    }
+    if k > 0 {
+        let step = k as u64;
+        if b as u64 + step > total as u64 {
+            return Err(AppError::new(
+                ErrorKind::Range,
+                format!(
+                    "moving line(s) {a}:{b} down by {step} would run past the end of a \
+                     {total}-line file"
+                ),
+            )
+            .with_hint(format!(
+                "the furthest down they can go is --by {}",
+                total - b
+            )));
+        }
+        Ok(b + 1 + step as usize)
+    } else {
+        let step = k.unsigned_abs();
+        if step >= a as u64 {
+            return Err(AppError::new(
+                ErrorKind::Range,
+                format!("moving line(s) {a}:{b} up by {step} would run past the start of the file"),
+            )
+            .with_hint(format!("the furthest up they can go is --by -{}", a - 1)));
+        }
+        Ok(a - step as usize)
+    }
 }
 
 pub fn write_all(
