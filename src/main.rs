@@ -360,6 +360,14 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs, forced: Option<ForcedEncoding>)
     };
 
     let (value, count) = ops::search(&doc, args, &needle)?;
+    // A miss is reported by exit code alone and prints nothing, which is right
+    // for a search — but it also makes this particular miss indistinguishable
+    // from the text genuinely not being there.
+    let hint = if count == 0 {
+        ops::crlf_regex_hint(&doc, &pattern, args.regex)
+    } else {
+        None
+    };
 
     if cli.json {
         let mut obj = value.as_object().cloned().unwrap_or_default();
@@ -367,16 +375,26 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs, forced: Option<ForcedEncoding>)
         obj.insert("command".into(), json!("search"));
         obj.insert("path".into(), json!(doc.path.display().to_string()));
         obj.insert("encoding".into(), json!(doc.encoding.name()));
+        // Present only when there is one, as `warnings` is on the write side.
+        if let Some(hint) = hint {
+            obj.insert("hint".into(), json!(hint));
+        }
         println!("{}", Value::Object(obj));
-    } else if let Some(matches) = value.get("matches").and_then(|m| m.as_array()) {
-        for m in matches {
-            println!(
-                "{}:{}:{}:{}",
-                doc.path.display(),
-                m["line"].as_u64().unwrap_or(0),
-                m["column"].as_u64().unwrap_or(0),
-                m["text"].as_str().unwrap_or("")
-            );
+    } else {
+        if let Some(matches) = value.get("matches").and_then(|m| m.as_array()) {
+            for m in matches {
+                println!(
+                    "{}:{}:{}:{}",
+                    doc.path.display(),
+                    m["line"].as_u64().unwrap_or(0),
+                    m["column"].as_u64().unwrap_or(0),
+                    m["text"].as_str().unwrap_or("")
+                );
+            }
+        }
+        // stderr, so that it cannot be mistaken for a match on stdout.
+        if let Some(hint) = hint {
+            eprintln!("intact: hint: {hint}");
         }
     }
 

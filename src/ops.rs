@@ -69,6 +69,52 @@ fn build_regex(pattern: &str, is_regex: bool, ignore_case: bool) -> Result<Regex
         .map_err(|e| AppError::new(ErrorKind::Usage, format!("invalid regular expression: {e}")))
 }
 
+/// Why a regex that spans lines found nothing in this file, when it did.
+///
+/// A literal `--find` never hits this: [`Ctx::shape`] rewrites the terminators
+/// in it to the file's own before it is matched, so a needle typed with `\n`
+/// finds CRLF text anyway. A pattern cannot be shaped that way — there the same
+/// two characters are syntax, and rewriting them would change what the pattern
+/// means — so it has to spell the tolerance out itself. That asymmetry is
+/// invisible until it costs a round trip, and the failure is a silent no-match
+/// rather than an error, so the explanation goes where the no-match is reported.
+pub fn crlf_regex_hint(doc: &Document, pattern: &str, is_regex: bool) -> Option<&'static str> {
+    if !is_regex || !matches_bare_lf(pattern) {
+        return None;
+    }
+    let (_, _, crlf, _) = lines::detect_eol(&doc.text);
+    (crlf > 0).then_some(
+        "this file has CRLF line endings, and a regex `\\n` matches a bare LF only — write \
+         `\\r?\\n` for a pattern that spans lines",
+    )
+}
+
+/// Whether `pattern` asks for an LF without allowing a CR in front of it.
+///
+/// Both spellings of the newline count: the two-character escape, and a real
+/// newline byte, which is what `--escapes` and a JSON `batch` script deliver.
+/// Any mention of CR at all — `\r?\n`, `[\r\n]` — means the pattern has already
+/// accounted for it and there is nothing to point out.
+fn matches_bare_lf(pattern: &str) -> bool {
+    let mut lf = false;
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => return false,
+            '\n' => lf = true,
+            // Consume the escaped character whatever it is, so that `\\n` — an
+            // escaped backslash followed by a plain `n` — does not count.
+            '\\' => match chars.next() {
+                Some('r') => return false,
+                Some('n') => lf = true,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    lf
+}
+
 /// Byte range of the decoded text covered by an optional line range.
 fn region(doc: &Document, range: &Option<LineRange>) -> Result<(usize, usize)> {
     match range {
@@ -162,15 +208,23 @@ pub fn replace(
     let total = found.len();
 
     if total == 0 {
-        return Err(AppError::new(
+        let err = AppError::new(
             ErrorKind::NoMatch,
             format!(
                 "no match for {} in {}",
                 describe(find, args.regex),
                 doc.path.display()
             ),
-        )
-        .with_hint("use `intact search` to check the text, or --regex for a pattern"));
+        );
+        return Err(match crlf_regex_hint(doc, find, args.regex) {
+            Some(hint) => err.with_hint(hint),
+            // Suggesting --regex to a caller who already passed it is worse
+            // than saying nothing, so that half is dropped once it is on.
+            None if args.regex => err.with_hint("use `intact search` to check the text"),
+            None => {
+                err.with_hint("use `intact search` to check the text, or --regex for a pattern")
+            }
+        });
     }
 
     let selected: Vec<usize> = match (args.all, args.occurrence, args.expect) {

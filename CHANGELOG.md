@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A file with no byte above 0x7F now reports `detected_by: ascii` rather than
+  `utf-8-valid`. Those bytes are valid UTF-8, but they are equally valid
+  windows-1252, KOI8-R and every other ASCII superset, so nothing was detected:
+  the old label claimed a reading the file does not support. **This changes the
+  `detected_by` value for such files**, in `info` and in every write report.
+- `--no-guess` now covers that case, at the one moment it can matter. An
+  ASCII-only edit to an ASCII file is safe under every encoding the file might
+  be, and is left alone; a write that adds a *non-ASCII* character is refused
+  with exit 5, because the byte it lands as comes from a default rather than
+  from anything observed, and the file is that encoding from then on. Without
+  `--no-guess` the write proceeds and reports a warning naming the character and
+  the encoding it settled on. This closes the gap the manual previously only
+  described — that `--encoding` was the sole protection for a file whose bytes
+  happen to read as UTF-8.
+- In `batch` the guard is checked per operation and refuses before anything is
+  written, so a script that trips it leaves every file it touched untouched.
+- `search` and `replace` explain a `--regex` pattern that fails only because of
+  the file's line endings: a regex `\n` matches a bare LF, so a pattern spanning
+  lines finds nothing in a CRLF file, where a literal `--find` typed the same way
+  matches — `Ctx::shape` rewrites its terminators to the file's and a pattern
+  cannot be rewritten that way. The hint names `\r?\n`, and appears on the
+  no-match error for `replace` and, for `search`, on stderr and as a `hint` field
+  under `--json`. It is raised only when the pattern asks for an LF without
+  allowing a CR and the file actually has CRLF endings.
 - `intact move-lines FILE --lines RANGE` moves a block of lines elsewhere in the
   same file. The destination is `--after N`, `--before N`, or `--by K` to shift
   the block K lines down (negative K moves it up). `--after` and `--before` name

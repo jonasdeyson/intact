@@ -270,15 +270,17 @@ git apply -p0 --check change.patch"#,
             Block::Numbered(&[
                 "`--encoding LABEL`, if given, wins outright.",
                 "A byte-order mark (UTF-8, UTF-16LE, UTF-16BE).",
-                "Bytes that are valid UTF-8 are treated as UTF-8.",
+                "A file with no byte above 0x7F is read as UTF-8, but reported as `ascii`:\n\
+                 nothing in it distinguishes UTF-8 from any other ASCII superset.",
+                "Other bytes that are valid UTF-8 are treated as UTF-8.",
                 "Otherwise chardetng guesses a legacy encoding.",
             ]),
             Block::Prose(
                 "`intact info FILE` reports which of these applied, as `detected_by`:\n\
-                 explicit, bom, utf-8-valid, guessed, or default (empty/new file).",
+                 explicit, bom, ascii, utf-8-valid, guessed, or default (empty/new file).",
             ),
             Block::Prose(
-                "Step 3 is a validity check, not a verification. Every single-byte encoding\n\
+                "Step 4 is a validity check, not a verification. Every single-byte encoding\n\
                  decodes every byte sequence, so bytes that are valid UTF-8 may equally be a\n\
                  windows-1252 file whose own content is already mojibake: `Ã©` in windows-1252 is\n\
                  the bytes C3 A9, which are also a perfectly good UTF-8 `é`. Such a file is\n\
@@ -295,8 +297,8 @@ git apply -p0 --check change.patch"#,
             Block::Prose(
                 "Note the limit of that risk: a windows-1252 file with ordinary text is not\n\
                  affected. Real `café` is 63 61 66 E9, which is not valid UTF-8, so it reaches\n\
-                 chardetng at step 4 as intended. Only a file whose windows-1252 content is\n\
-                 *itself* mojibake reaches step 3 by accident — a file that was already damaged\n\
+                 chardetng at step 5 as intended. Only a file whose windows-1252 content is\n\
+                 *itself* mojibake reaches step 4 by accident — a file that was already damaged\n\
                  before `intact` saw it.",
             ),
             Block::Heading("MOJIBAKE ALREADY IN THE FILE"),
@@ -347,10 +349,19 @@ line 1: text that was written through the wrong encoding at some point."#,
                  still work, so a file that trips the guard can still be diagnosed.",
             ),
             Block::Prose(
-                "Note its scope: `--no-guess` covers `detected_by: guessed`, the chardetng path.\n\
-                 It does not fire on `utf-8-valid`, which is an inference too but not a\n\
-                 statistical one. Only `--encoding` covers that case, which is why the two flags\n\
-                 go together rather than either standing in for the other.",
+                "Note its scope. `--no-guess` covers `detected_by: guessed`, the chardetng path,\n\
+                 and it covers `detected_by: ascii` at the one moment that reading can be wrong:\n\
+                 an ASCII file reads the same under every ASCII superset, so a write that adds\n\
+                 no non-ASCII character is safe whatever the project's encoding is, and a write\n\
+                 that adds one is refused unless `--encoding` says which encoding to add it in.\n\
+                 Without `--no-guess` that write proceeds and reports a warning.",
+            ),
+            Block::Prose(
+                "It does not fire on `utf-8-valid` — a file with non-ASCII bytes that decode as\n\
+                 UTF-8. That is an inference too, and a wrong one for a windows-1252 file whose\n\
+                 own content is already mojibake, but nothing in the bytes marks it as wrong.\n\
+                 Only `--encoding` covers that case, which is why the two flags go together\n\
+                 rather than either standing in for the other.",
             ),
             Block::Prose(
                 "That pairing matters more than it looks. A wrong single-byte guess does not\n\
@@ -536,6 +547,13 @@ intact convert FILE --to utf-8 --newlines lf # also normalise line endings"#,
             Block::Prose(
                 "Under auto, a literal (non-regex) `--find` is also rewritten, so searching for\n\
                  'a\\nb' works on a CRLF file.",
+            ),
+            Block::Prose(
+                "A `--regex` pattern is not rewritten — there the same characters are syntax,\n\
+                 and changing them would change what the pattern means. So a regex spanning\n\
+                 lines has to allow for the terminator itself: write `\\r?\\n`, not `\\n`, or it\n\
+                 matches nothing in a CRLF file. `search` and `replace` say so when a pattern\n\
+                 fails that way rather than leaving it as an unexplained no-match.",
             ),
             Block::Heading("PROJECTS THAT MANDATE ONE LINE-ENDING STYLE"),
             Block::Prose(

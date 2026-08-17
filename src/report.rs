@@ -226,6 +226,15 @@ pub fn finish(cli: &Cli, doc: &Document, command: &'static str, outcome: OpOutco
         details,
         summary,
     } = outcome;
+    // Before anything is built: under --no-guess this is a refusal, and a
+    // refusal that reported a diff first would be reporting a write that is not
+    // going to happen. --dry-run is included deliberately, for the same reason
+    // `preflight` refuses there — a preview of a write the flags forbid is not
+    // a preview of anything.
+    let undeclared = doc.undeclared_ascii_write(&edits);
+    if let (Some(ch), true) = (undeclared, cli.no_guess) {
+        return Err(doc.undeclared_ascii_error(ch));
+    }
     // build_output sorts the edits, which apply_to_text and the diff both rely
     // on to walk the text in one pass.
     let bytes = doc.build_output(&mut edits, cli.unmappable, cli.lossy)?;
@@ -235,6 +244,9 @@ pub fn finish(cli: &Cli, doc: &Document, command: &'static str, outcome: OpOutco
     let changed = bytes != doc.raw || !doc.existed;
 
     let mut report = Report::new(command, doc);
+    if let Some(ch) = undeclared {
+        report.warnings.push(doc.undeclared_ascii_warning(ch));
+    }
     report.summary = summary;
     report.details = details;
     report.changed = changed;

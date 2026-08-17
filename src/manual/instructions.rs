@@ -104,8 +104,11 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
              On a write, anything else means the flag did not reach the command. Do not read \
              `utf-8-valid` as reassurance: it says only that the bytes *can* be read as UTF-8, \
              which is also true of plenty of real `{label}` files, and `--no-guess` does not \
-             catch it — that guard covers `guessed` alone. `--encoding {label}` is the only \
-             thing that makes the encoding a decision rather than an inference.\n\n\
+             catch it. `detected_by: ascii` means the file has no non-ASCII byte at all, so it \
+             is every encoding at once until something writes one — `--no-guess` refuses that \
+             write, but only that one, so a run of ASCII-only edits will never remind you. \
+             `--encoding {label}` is the only thing that makes the encoding a decision rather \
+             than an inference.\n\n\
              Put the flags in the command every time. Do not try to set this once for the \
              session — `{cmd}` reads no environment variables and no config file, and each of \
              your commands may run in a fresh shell anyway.\n\n\

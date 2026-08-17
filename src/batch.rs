@@ -204,6 +204,7 @@ pub fn run(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -> 
                     pinned,
                     current,
                     ops: 0,
+                    undeclared: None,
                 });
                 targets.len() - 1
             }
@@ -222,6 +223,17 @@ pub fn run(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -> 
             ..e
         })?;
         let mut edits = outcome.edits;
+        // The pinned encoding carries `Detection::Ascii` forward, so this still
+        // fires on the operation that first brings a non-ASCII character in
+        // even though the ops after it are editing bytes that are no longer
+        // ASCII. Only the first such character per file is kept: one advisory
+        // about the file's encoding is the whole point of it.
+        if let Some(ch) = doc.undeclared_ascii_write(&edits) {
+            if cli.no_guess {
+                return Err(doc.undeclared_ascii_error(ch));
+            }
+            target.undeclared.get_or_insert(ch);
+        }
         target.current = doc.build_output(&mut edits, cli.unmappable, cli.lossy)?;
         target.ops += 1;
     }
@@ -242,6 +254,11 @@ pub fn run(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -> 
         );
 
         let mut report = Report::new("batch", &target.original);
+        if let Some(ch) = target.undeclared {
+            report
+                .warnings
+                .push(target.original.undeclared_ascii_warning(ch));
+        }
         report.summary = format!("applied {} operation(s)", target.ops);
         report.changed = changed;
         report.dry_run = cli.dry_run;
@@ -305,6 +322,9 @@ struct BatchTarget {
     /// The file's bytes as of the last applied operation.
     current: Vec<u8>,
     ops: usize,
+    /// The first non-ASCII character the script writes into a file whose
+    /// encoding was never observed, if it writes one.
+    undeclared: Option<char>,
 }
 
 /// The op's `file` has already been resolved into `doc` by the caller, so it is

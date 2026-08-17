@@ -233,14 +233,20 @@ so rather than printing nothing.
 ### Detection order
 
 1. `--encoding LABEL`, if given, wins outright.
+
 2. A byte-order mark (UTF-8, UTF-16LE, UTF-16BE).
-3. Bytes that are valid UTF-8 are treated as UTF-8.
-4. Otherwise chardetng guesses a legacy encoding.
+
+3. A file with no byte above 0x7F is read as UTF-8, but reported as `ascii`:
+   nothing in it distinguishes UTF-8 from any other ASCII superset.
+
+4. Other bytes that are valid UTF-8 are treated as UTF-8.
+
+5. Otherwise chardetng guesses a legacy encoding.
 
 `intact info FILE` reports which of these applied, as `detected_by`:
-explicit, bom, utf-8-valid, guessed, or default (empty/new file).
+explicit, bom, ascii, utf-8-valid, guessed, or default (empty/new file).
 
-Step 3 is a validity check, not a verification. Every single-byte encoding
+Step 4 is a validity check, not a verification. Every single-byte encoding
 decodes every byte sequence, so bytes that are valid UTF-8 may equally be a
 windows-1252 file whose own content is already mojibake: `Ã©` in windows-1252 is
 the bytes C3 A9, which are also a perfectly good UTF-8 `é`. Such a file is
@@ -255,8 +261,8 @@ why a project with a known encoding should declare it on every command.
 
 Note the limit of that risk: a windows-1252 file with ordinary text is not
 affected. Real `café` is 63 61 66 E9, which is not valid UTF-8, so it reaches
-chardetng at step 4 as intended. Only a file whose windows-1252 content is
-*itself* mojibake reaches step 3 by accident — a file that was already damaged
+chardetng at step 5 as intended. Only a file whose windows-1252 content is
+*itself* mojibake reaches step 4 by accident — a file that was already damaged
 before `intact` saw it.
 
 ### Mojibake already in the file
@@ -301,10 +307,18 @@ intact --encoding latin1 --no-guess replace FILE --find X --with Y
 with exit 5 instead of proceeding. Read-only commands (info, view, search)
 still work, so a file that trips the guard can still be diagnosed.
 
-Note its scope: `--no-guess` covers `detected_by: guessed`, the chardetng path.
-It does not fire on `utf-8-valid`, which is an inference too but not a
-statistical one. Only `--encoding` covers that case, which is why the two flags
-go together rather than either standing in for the other.
+Note its scope. `--no-guess` covers `detected_by: guessed`, the chardetng path,
+and it covers `detected_by: ascii` at the one moment that reading can be wrong:
+an ASCII file reads the same under every ASCII superset, so a write that adds
+no non-ASCII character is safe whatever the project's encoding is, and a write
+that adds one is refused unless `--encoding` says which encoding to add it in.
+Without `--no-guess` that write proceeds and reports a warning.
+
+It does not fire on `utf-8-valid` — a file with non-ASCII bytes that decode as
+UTF-8. That is an inference too, and a wrong one for a windows-1252 file whose
+own content is already mojibake, but nothing in the bytes marks it as wrong.
+Only `--encoding` covers that case, which is why the two flags go together
+rather than either standing in for the other.
 
 That pairing matters more than it looks. A wrong single-byte guess does not
 merely display the file oddly: existing bytes survive, but text you insert is
@@ -471,6 +485,12 @@ which is what you want when editing code containing regex or Windows paths.
 
 Under auto, a literal (non-regex) `--find` is also rewritten, so searching for
 'a\nb' works on a CRLF file.
+
+A `--regex` pattern is not rewritten — there the same characters are syntax,
+and changing them would change what the pattern means. So a regex spanning
+lines has to allow for the terminator itself: write `\r?\n`, not `\n`, or it
+matches nothing in a CRLF file. `search` and `replace` say so when a pattern
+fails that way rather than leaving it as an unexplained no-match.
 
 ### Projects that mandate one line-ending style
 

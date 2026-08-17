@@ -1683,6 +1683,194 @@ fn no_guess_refuses_writes_to_undeclared_encodings() {
     );
 }
 
+/// A file with no non-ASCII byte reads identically under every ASCII superset,
+/// so nothing in it says which one the project means it to be. `info` says as
+/// much rather than claiming a UTF-8 detection it did not make.
+#[test]
+fn a_pure_ascii_file_reports_that_nothing_was_detected() {
+    let sb = Sandbox::new("asciidetect");
+    let f = sb.file("a.txt", b"plain text\n");
+    let p = f.to_str().unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&stdout(&run(&["info", p, "--json"]))).unwrap();
+    assert_eq!(v["encoding"], "UTF-8");
+    assert_eq!(v["detected_by"], "ascii");
+
+    // One non-ASCII byte is a real detection, and reported as one.
+    let g = sb.file("b.txt", "héllo\n".as_bytes());
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout(&run(&["info", g.to_str().unwrap(), "--json"]))).unwrap();
+    assert_eq!(v["detected_by"], "utf-8-valid");
+}
+
+/// The write that turns an undeclared ASCII file into a file of some definite
+/// encoding: the only moment the missing --encoding changes the bytes on disk.
+#[test]
+fn writing_non_ascii_into_an_undeclared_ascii_file() {
+    let sb = Sandbox::new("asciiguard");
+    let f = sb.file("a.txt", b"cafe\n");
+    let p = f.to_str().unwrap();
+
+    // Under the mandate flag it is a refusal, and nothing is written.
+    let out = run(&[
+        "--no-guess",
+        "replace",
+        p,
+        "--find",
+        "cafe",
+        "--with",
+        "café",
+    ]);
+    assert_eq!(code(&out), 5);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("never observed"), "stderr was: {err}");
+    assert!(err.contains("--encoding"), "stderr was: {err}");
+    assert_eq!(read(&f), b"cafe\n".to_vec());
+
+    // An ASCII-only edit to the same file is unaffected: every encoding it
+    // could be agrees about those bytes.
+    assert_eq!(
+        code(&run(&[
+            "--no-guess",
+            "replace",
+            p,
+            "--find",
+            "cafe",
+            "--with",
+            "tea"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"tea\n".to_vec());
+
+    // Declaring the encoding is what the refusal asked for, and settles it.
+    let g = sb.file("b.txt", b"cafe\n");
+    let out = run(&[
+        "--encoding",
+        "windows-1252",
+        "--no-guess",
+        "replace",
+        g.to_str().unwrap(),
+        "--find",
+        "cafe",
+        "--with",
+        "café",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&g), b"caf\xE9\n".to_vec());
+
+    // Without --no-guess the write proceeds — but says what it decided.
+    let h = sb.file("c.txt", b"cafe\n");
+    let out = run(&[
+        "replace",
+        h.to_str().unwrap(),
+        "--find",
+        "cafe",
+        "--with",
+        "café",
+    ]);
+    assert_eq!(code(&out), 0);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("warning"), "stderr was: {err}");
+    assert!(err.contains("UTF-8 from here on"), "stderr was: {err}");
+    assert_eq!(read(&h), "café\n".as_bytes().to_vec());
+}
+
+/// A batch is a transaction, so the guard has to stop it before any of its
+/// files are written, not after the operation that trips it.
+#[test]
+fn the_ascii_guard_covers_batch() {
+    let sb = Sandbox::new("asciibatch");
+    let a = sb.file("a.txt", b"one\n");
+    let b = sb.file("b.txt", b"two\n");
+    let script = sb.file(
+        "ops.json",
+        format!(
+            r#"[{{"op":"replace","file":{:?},"find":"one","with":"uno"}},
+                {{"op":"replace","file":{:?},"find":"two","with":"deux é"}}]"#,
+            a.display().to_string(),
+            b.display().to_string()
+        )
+        .as_bytes(),
+    );
+
+    let out = run(&["--no-guess", "batch", "--script", script.to_str().unwrap()]);
+    assert_eq!(code(&out), 5);
+    // The first operation succeeded and is still discarded.
+    assert_eq!(read(&a), b"one\n".to_vec());
+    assert_eq!(read(&b), b"two\n".to_vec());
+
+    // Without the flag it applies, with one warning naming the file it settled.
+    let out = run(&["batch", "--script", script.to_str().unwrap()]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(err.matches("warning").count(), 1, "stderr was: {err}");
+    assert!(err.contains("b.txt"), "stderr was: {err}");
+    assert_eq!(read(&a), b"uno\n".to_vec());
+}
+
+/// A regex `\n` matches a bare LF, so a pattern spanning lines finds nothing in
+/// a CRLF file. The literal path is shaped to the file's terminators and does
+/// not have the problem, which is exactly what makes the regex one surprising.
+#[test]
+fn a_regex_spanning_lines_explains_itself_on_a_crlf_file() {
+    let sb = Sandbox::new("crlfregex");
+    let f = sb.file("a.txt", b"alpha\r\nbeta\r\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&["search", p, "--regex", "--find", r"alpha\nbeta"]);
+    assert_eq!(code(&out), 3);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(r"\r?\n"), "stderr was: {err}");
+
+    // The same on the write side, as the hint of the no-match error.
+    let out = run(&[
+        "replace",
+        p,
+        "--regex",
+        "--find",
+        r"alpha\nbeta",
+        "--with",
+        "x",
+    ]);
+    assert_eq!(code(&out), 3);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(r"\r?\n"), "stderr was: {err}");
+
+    // And in JSON, where a caller reads it as a field rather than off stderr.
+    let out = run(&["--json", "search", p, "--regex", "--find", r"alpha\nbeta"]);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["count"], 0);
+    assert!(v["hint"].as_str().unwrap().contains(r"\r?\n"), "{v}");
+
+    // Taking the advice works.
+    let out = run(&["search", p, "--regex", "--find", r"alpha\r?\nbeta"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    // The hint is specific to this failure: it stays off when the pattern has
+    // already accounted for CR, when the file has no CRLF, and when a miss has
+    // nothing to do with line endings.
+    for args in [
+        vec!["search", p, "--regex", "--find", r"alpha\r?\nzzz"],
+        vec!["search", p, "--regex", "--find", r"zzz"],
+    ] {
+        let out = run(&args);
+        assert_eq!(code(&out), 3);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.contains("CRLF"), "{args:?} hinted: {err}");
+    }
+    let g = sb.file("b.txt", b"alpha\nbeta\n");
+    let out = run(&[
+        "search",
+        g.to_str().unwrap(),
+        "--regex",
+        "--find",
+        r"a\nzzz",
+    ]);
+    assert_eq!(code(&out), 3);
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("CRLF"));
+}
+
 /// The line-ending equivalent of the encoding mandate.
 #[test]
 fn the_eol_flag_covers_creation_and_editing() {

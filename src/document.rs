@@ -28,7 +28,10 @@ pub enum Detection {
     Explicit,
     /// A byte-order mark was present.
     Bom,
-    /// The bytes are valid UTF-8.
+    /// Every byte is ASCII, so the file says nothing about its own encoding:
+    /// UTF-8 and every ASCII-superset legacy encoding read it identically.
+    Ascii,
+    /// The bytes are valid UTF-8, and at least one of them is not ASCII.
     Utf8,
     /// Statistically guessed (chardetng).
     Guessed,
@@ -41,6 +44,7 @@ impl Detection {
         match self {
             Detection::Explicit => "explicit",
             Detection::Bom => "bom",
+            Detection::Ascii => "ascii",
             Detection::Utf8 => "utf-8-valid",
             Detection::Guessed => "guessed",
             Detection::Default => "default",
@@ -181,6 +185,12 @@ impl Document {
                     let body = &raw[..];
                     if body.is_empty() {
                         (UTF_8, Detection::Default, None)
+                    } else if body.is_ascii() {
+                        // Separated from the UTF-8 verdict below because it is a
+                        // weaker one: those bytes are valid UTF-8, but they are
+                        // equally valid windows-1252, KOI8-R and every other
+                        // ASCII superset. Nothing was detected here.
+                        (UTF_8, Detection::Ascii, None)
                     } else if std::str::from_utf8(body).is_ok() {
                         (UTF_8, Detection::Utf8, None)
                     } else {
@@ -304,6 +314,68 @@ impl Document {
             ));
         }
         Some(msg)
+    }
+
+    /// The first non-ASCII character an edit would add to a file that is
+    /// currently pure ASCII and whose encoding nobody declared.
+    ///
+    /// Until such a character arrives, the file reads the same under every
+    /// ASCII superset and every command is safe whichever one the project means
+    /// it to be. The character is what settles it: the byte it is written as
+    /// comes from `self.encoding`, which here is a default rather than an
+    /// observation, and from then on the file really is that encoding. That is
+    /// the one moment at which the missing `--encoding` changes the outcome, so
+    /// it is the moment to say so — an ASCII-only edit is left alone, which is
+    /// nearly all of them.
+    ///
+    /// `Detection::Explicit` and `Detection::Bom` are decisions and never reach
+    /// here; `Guessed` is caught earlier, by `--no-guess`.
+    pub fn undeclared_ascii_write(&self, edits: &[Edit]) -> Option<char> {
+        if self.detection != Detection::Ascii {
+            return None;
+        }
+        edits
+            .iter()
+            .flat_map(|e| e.text.chars())
+            .find(|c| !c.is_ascii())
+    }
+
+    /// The refusal `--no-guess` turns [`Document::undeclared_ascii_write`] into.
+    pub fn undeclared_ascii_error(&self, ch: char) -> AppError {
+        AppError::new(
+            ErrorKind::Encoding,
+            format!(
+                "refusing to write: every byte in {} is ASCII, so its encoding was never \
+                 observed, and {}",
+                self.path.display(),
+                self.settles_it(ch)
+            ),
+        )
+        .with_hint(format!(
+            "pass --encoding LABEL to declare it — --encoding {} if that is what the file \
+             should be",
+            self.encoding.name().to_lowercase()
+        ))
+    }
+
+    /// The same thing as an advisory, for a write that was not run under
+    /// `--no-guess`. No path: [`crate::report::print_report`] prefixes one.
+    pub fn undeclared_ascii_warning(&self, ch: char) -> String {
+        format!(
+            "every byte in this file was ASCII, so nothing in it said which encoding it is, and \
+             {}. Pass --encoding LABEL to make that a decision rather than a default.",
+            self.settles_it(ch)
+        )
+    }
+
+    fn settles_it(&self, ch: char) -> String {
+        format!(
+            "writing {:?} (U+{:04X}) encodes it as {} — the file is {} from here on",
+            ch,
+            ch as u32,
+            self.encoding.name(),
+            self.encoding.name()
+        )
     }
 
     /// Apply edits to the decoded text (used for previews and for computing the
