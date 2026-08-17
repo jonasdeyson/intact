@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use atomic::ensure_parent_dir;
 use binary::BinaryPolicy;
 use cli::{BomMode, Cli, Command};
-use document::{Document, ForcedEncoding};
+use document::{Detection, Document, ForcedEncoding};
 use encoding_util::{BomKind, encode_text};
 use error::{AppError, ErrorKind, Result};
 use lines::{Eol, EolMode};
@@ -235,11 +235,23 @@ fn cmd_info(cli: &Cli, path: &Path, forced: Option<ForcedEncoding>) -> Result<i3
         return Ok(0);
     }
 
-    println!(
-        "encoding:        {} (detected by: {})",
-        doc.encoding.name(),
-        doc.detection.as_str()
-    );
+    // "detected by: ascii" would assert the one thing being ASCII rules out.
+    // The encoding still has to be named — it is what a write would encode new
+    // text in, and the ASCII label is not a substitute for it: WHATWG maps
+    // `ascii` to windows-1252, so printing it here would invite an --encoding
+    // that quietly means something else. What changes is the claim made for it.
+    if doc.detection == Detection::Ascii {
+        println!(
+            "encoding:        {} (assumed - every byte is ASCII)",
+            doc.encoding.name()
+        );
+    } else {
+        println!(
+            "encoding:        {} (detected by: {})",
+            doc.encoding.name(),
+            doc.detection.as_str()
+        );
+    }
     println!(
         "bom:             {}",
         if doc.bom.is_some() { "yes" } else { "no" }

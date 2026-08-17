@@ -245,6 +245,11 @@ so rather than printing nothing.
 
 `intact info FILE` reports which of these applied, as `detected_by`:
 explicit, bom, ascii, utf-8-valid, guessed, or default (empty/new file).
+`ascii` is the absence of a detection rather than one of them, so the human
+report words it as such: `UTF-8 (assumed - every byte is ASCII)`. UTF-8 is
+still named there because it is what a write would encode new text in — and
+because `--encoding ascii` is not a way to say this: the WHATWG label `ascii`
+resolves to windows-1252.
 
 Step 4 is a validity check, not a verification. Every single-byte encoding
 decodes every byte sequence, so bytes that are valid UTF-8 may equally be a

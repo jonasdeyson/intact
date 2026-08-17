@@ -1696,6 +1696,17 @@ fn a_pure_ascii_file_reports_that_nothing_was_detected() {
     assert_eq!(v["encoding"], "UTF-8");
     assert_eq!(v["detected_by"], "ascii");
 
+    // The human report has to name the encoding a write would use, but must not
+    // call it a detection: being ASCII is the evidence that nothing was
+    // detected. ("ASCII" cannot stand in for the name — the WHATWG label
+    // `ascii` means windows-1252, so it would invite the wrong flag.)
+    let text = stdout(&run(&["info", p]));
+    assert!(
+        text.contains("encoding:        UTF-8 (assumed - every byte is ASCII)"),
+        "{text}"
+    );
+    assert!(!text.contains("detected by: ascii"), "{text}");
+
     // One non-ASCII byte is a real detection, and reported as one.
     let g = sb.file("b.txt", "héllo\n".as_bytes());
     let v: serde_json::Value =

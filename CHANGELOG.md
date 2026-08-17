@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   windows-1252, KOI8-R and every other ASCII superset, so nothing was detected:
   the old label claimed a reading the file does not support. **This changes the
   `detected_by` value for such files**, in `info` and in every write report.
+- `info`'s human line words that as the absence of a detection rather than one
+  of them — `encoding: UTF-8 (assumed - every byte is ASCII)` — since "detected
+  by: ascii" would assert the very thing being ASCII rules out. The encoding is
+  still named, being what a write would encode new text in, and because
+  `--encoding ascii` is not a way to say this: the WHATWG label `ascii` resolves
+  to windows-1252. The `--json` field keeps the `ascii` token.
 - `--no-guess` now covers that case, at the one moment it can matter. An
   ASCII-only edit to an ASCII file is safe under every encoding the file might
   be, and is left alone; a write that adds a *non-ASCII* character is refused

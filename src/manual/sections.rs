@@ -277,7 +277,12 @@ git apply -p0 --check change.patch"#,
             ]),
             Block::Prose(
                 "`intact info FILE` reports which of these applied, as `detected_by`:\n\
-                 explicit, bom, ascii, utf-8-valid, guessed, or default (empty/new file).",
+                 explicit, bom, ascii, utf-8-valid, guessed, or default (empty/new file).\n\
+                 `ascii` is the absence of a detection rather than one of them, so the human\n\
+                 report words it as such: `UTF-8 (assumed - every byte is ASCII)`. UTF-8 is\n\
+                 still named there because it is what a write would encode new text in — and\n\
+                 because `--encoding ascii` is not a way to say this: the WHATWG label `ascii`\n\
+                 resolves to windows-1252.",
             ),
             Block::Prose(
                 "Step 4 is a validity check, not a verification. Every single-byte encoding\n\
