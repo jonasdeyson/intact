@@ -208,6 +208,194 @@ fn delete_and_replace_lines() {
 }
 
 #[test]
+fn move_lines_by_every_destination_form() {
+    let sb = Sandbox::new("move");
+    let f = sb.file("a.txt", b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n");
+    let p = f.to_str().unwrap();
+    let reset = || std::fs::write(&f, b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n").unwrap();
+
+    // Destinations name lines as the file is numbered *now*, so --after 7 puts
+    // the block below the line that currently reads "7".
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "3:4", "--after", "7"])),
+        0
+    );
+    assert_eq!(read(&f), b"1\n2\n5\n6\n7\n3\n4\n8\n9\n10\n".to_vec());
+
+    reset();
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "7:8", "--before", "3"])),
+        0
+    );
+    assert_eq!(read(&f), b"1\n2\n7\n8\n3\n4\n5\n6\n9\n10\n".to_vec());
+
+    // --by K lands the block's first line at a + K either way round.
+    reset();
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "1:2", "--by", "5"])),
+        0
+    );
+    assert_eq!(read(&f), b"3\n4\n5\n6\n7\n1\n2\n8\n9\n10\n".to_vec());
+
+    reset();
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "7", "--by", "-3"])),
+        0
+    );
+    assert_eq!(read(&f), b"1\n2\n3\n7\n4\n5\n6\n8\n9\n10\n".to_vec());
+
+    // The two ends of the file: --after $ and --before 1.
+    reset();
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "1:2", "--after", "$"])),
+        0
+    );
+    assert_eq!(read(&f), b"3\n4\n5\n6\n7\n8\n9\n10\n1\n2\n".to_vec());
+
+    reset();
+    assert_eq!(
+        code(&run(&[
+            "move-lines",
+            p,
+            "--lines",
+            "-2:-1",
+            "--before",
+            "1"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"9\n10\n1\n2\n3\n4\n5\n6\n7\n8\n".to_vec());
+}
+
+#[test]
+fn move_lines_refuses_a_destination_it_cannot_honour() {
+    let sb = Sandbox::new("movebad");
+    let f = sb.file("a.txt", b"1\n2\n3\n4\n5\n");
+    let p = f.to_str().unwrap();
+
+    // Inside the block: a block cannot be moved into itself.
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "2:4", "--after", "3"])),
+        2
+    );
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "2:4", "--before", "3"])),
+        2
+    );
+    // The whole file has nowhere to go.
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "1:$", "--after", "2"])),
+        2
+    );
+    // --by past either end is a range error, not a clamp.
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "2:4", "--by", "9"])),
+        6
+    );
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "2:4", "--by", "-5"])),
+        6
+    );
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "9", "--after", "1"])),
+        6
+    );
+    // A destination is required, and only one of them.
+    assert_eq!(code(&run(&["move-lines", p, "--lines", "2"])), 2);
+    assert_eq!(
+        code(&run(&["move-lines", p, "--lines", "2", "--by", "0"])),
+        2
+    );
+    assert_eq!(
+        code(&run(&[
+            "move-lines",
+            p,
+            "--lines",
+            "2",
+            "--after",
+            "4",
+            "--by",
+            "1"
+        ])),
+        2
+    );
+    // Every one of those wrote nothing.
+    assert_eq!(read(&f), b"1\n2\n3\n4\n5\n".to_vec());
+
+    // Naming where the block already is changes nothing, and is not an error:
+    // a script that computes a destination may arrive at the current one.
+    let out = run(&["move-lines", p, "--lines", "2:4", "--after", "4"]);
+    assert_eq!(code(&out), 0);
+    assert!(stdout(&out).contains("unchanged"), "{}", stdout(&out));
+    assert_eq!(read(&f), b"1\n2\n3\n4\n5\n".to_vec());
+}
+
+#[test]
+fn move_lines_keeps_encoding_endings_and_final_newline() {
+    let sb = Sandbox::new("movekeep");
+
+    // The moved bytes are spliced, not re-encoded from scratch.
+    let f = sb.file("latin1.txt", b"caf\xE9\nr\xE9sum\xE9\nx\n");
+    assert_eq!(
+        code(&run(&[
+            "move-lines",
+            f.to_str().unwrap(),
+            "--lines",
+            "1",
+            "--after",
+            "2"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"r\xE9sum\xE9\ncaf\xE9\nx\n".to_vec());
+
+    let f = sb.file("crlf.txt", b"1\r\n2\r\n3\r\n4\r\n");
+    assert_eq!(
+        code(&run(&[
+            "move-lines",
+            f.to_str().unwrap(),
+            "--lines",
+            "1",
+            "--after",
+            "3"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"2\r\n3\r\n1\r\n4\r\n".to_vec());
+
+    // A file with no final newline keeps having none, whichever end the block
+    // is lifted from: the unterminated last line takes a terminator with it on
+    // the way up, and gives its own away on the way down.
+    let f = sb.file("tail.txt", b"a\nb\nc");
+    assert_eq!(
+        code(&run(&[
+            "move-lines",
+            f.to_str().unwrap(),
+            "--lines",
+            "$",
+            "--before",
+            "1"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"c\na\nb".to_vec());
+
+    let f = sb.file("head.txt", b"a\nb\nc");
+    assert_eq!(
+        code(&run(&[
+            "move-lines",
+            f.to_str().unwrap(),
+            "--lines",
+            "1",
+            "--after",
+            "$"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"b\nc\na".to_vec());
+}
+
+#[test]
 fn file_without_trailing_newline_is_respected() {
     let sb = Sandbox::new("notrailing");
     let f = sb.file("a.txt", b"one\ntwo");
@@ -914,6 +1102,29 @@ fn batch_applies_operations_atomically() {
 }
 
 #[test]
+fn batch_moves_lines_against_the_running_state() {
+    let sb = Sandbox::new("batchmove");
+    let f = sb.file("a.txt", b"1\n2\n3\n4\n5\n");
+    let script = sb.file(
+        "script.json",
+        r#"[{"op":"move-lines","lines":"1:2","after":"$"},
+            {"op":"move-lines","lines":"$","by":-2},
+            {"op":"delete","lines":1}]"#
+            .as_bytes(),
+    );
+
+    let out = run(&[
+        "batch",
+        f.to_str().unwrap(),
+        "--script",
+        script.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    // 1 2 3 4 5 -> 3 4 5 1 2 -> 3 4 2 5 1 -> 4 2 5 1
+    assert_eq!(read(&f), b"4\n2\n5\n1\n".to_vec());
+}
+
+#[test]
 fn batch_failure_leaves_the_file_untouched() {
     let sb = Sandbox::new("batchfail");
     let f = sb.file("a.txt", LATIN1);
@@ -1107,6 +1318,210 @@ fn binary_files_are_refused_by_default() {
     assert_eq!(code(&out), 5);
 }
 
+/// The guard covers reading, not only writing: `view` on a binary would
+/// otherwise emit raw NULs and escape sequences and exit 0.
+#[test]
+fn binary_files_are_refused_by_the_reading_commands_too() {
+    let sb = Sandbox::new("binaryread");
+    let f = sb.file("a.bin", b"abc\x00def\n");
+    let p = f.to_str().unwrap();
+
+    for args in [
+        vec!["view", p],
+        vec!["search", p, "--find", "abc"],
+        vec!["convert", p, "--to", "utf-8"],
+    ] {
+        let out = run(&args);
+        assert_eq!(code(&out), 5, "{} was not refused", args[0]);
+        assert!(out.stdout.is_empty(), "{} wrote to stdout", args[0]);
+    }
+
+    // --force is the single override, for reads as for writes.
+    let out = run(&["view", p, "--force"]);
+    assert_eq!(code(&out), 0);
+    assert_eq!(out.stdout, b"abc\x00def\n");
+}
+
+/// `info` is the exception: it is how a caller learns why the rest refused,
+/// so it always reports. What it reports for a non-text file is the byte-level
+/// truth and the verdict, and nothing derived from decoding it - an encoding
+/// guessed for a blob, and the line endings of the result, are not facts about
+/// the file.
+#[test]
+fn info_reports_the_verdict_and_withholds_the_text_report() {
+    let sb = Sandbox::new("binaryinfo");
+    let f = sb.file("a.bin", b"abc\x00def\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&["info", p]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("not text:"), "{text}");
+    assert!(text.contains("NUL byte at offset 3"), "{text}");
+    for withheld in [
+        "encoding:",
+        "bom:",
+        "line endings:",
+        "lines:",
+        "characters:",
+        "final newline:",
+        "edit safety:",
+    ] {
+        assert!(!text.contains(withheld), "{withheld} survived:\n{text}");
+    }
+    // What is true of the bytes stays.
+    assert!(text.contains("bytes:           8"), "{text}");
+
+    let v: serde_json::Value = serde_json::from_str(&stdout(&run(&["info", p, "--json"]))).unwrap();
+    assert_eq!(v["looks_binary"], true);
+    assert_eq!(v["binary"]["reason"], "nul");
+    assert_eq!(v["binary"]["offset"], 3);
+    assert_eq!(v["bytes"], 8);
+    for withheld in [
+        "encoding",
+        "detected_by",
+        "bom",
+        "eol",
+        "lines",
+        "characters",
+    ] {
+        assert!(v.get(withheld).is_none(), "{withheld} survived: {v}");
+    }
+}
+
+/// --force means "treat this as text" for `info` as it does everywhere else,
+/// so the withheld report comes back in full - with the verdict still on top.
+#[test]
+fn info_force_prints_the_text_report_for_a_binary() {
+    let sb = Sandbox::new("binaryinfoforce");
+    let f = sb.file("a.bin", b"abc\x00def\n");
+    let p = f.to_str().unwrap();
+
+    let text = stdout(&run(&["info", p, "--force"]));
+    assert!(text.contains("not text:"), "{text}");
+    assert!(text.contains("encoding:"), "{text}");
+    assert!(text.contains("line endings:"), "{text}");
+    assert!(text.contains("edit safety:"), "{text}");
+
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout(&run(&["info", p, "--json", "--force"]))).unwrap();
+    assert_eq!(v["looks_binary"], true);
+    assert!(v.get("encoding").is_some(), "{v}");
+    assert!(v.get("binary").is_some(), "{v}");
+}
+
+/// The mojibake shape is two ordinary bytes in sequence, so any blob turns it
+/// up by chance. Reporting it alongside "this is not a text file" would tell
+/// the reader to go and report damage in an ELF binary.
+#[test]
+fn binary_files_are_not_also_reported_as_mojibake() {
+    let sb = Sandbox::new("binarymoji");
+    // "Ã©" in windows-1252 is the canonical mojibake shape; the NUL is what
+    // makes this a non-text file.
+    let f = sb.file("a.bin", b"\x00\xC3\xA9 \xC3\xA9 \xC3\xA9 \xC3\xA9\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&["info", p]);
+    let text = stdout(&out);
+    assert!(!text.contains("mojibake"), "{text}");
+    let v: serde_json::Value = serde_json::from_str(&stdout(&run(&["info", p, "--json"]))).unwrap();
+    assert!(v.get("mojibake").is_none(), "{v}");
+
+    // Nor on the write path, where --force has got past the guard.
+    let out = run(&["append", p, "--text", "x", "--force"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("mojibake"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A text file carrying the same shape still gets the warning. Written as
+    // double-encoded UTF-8, since without the NUL the file decodes as UTF-8
+    // and the windows-1252 reading that turns C3 A9 into "Ã©" never happens.
+    let g = sb.file(
+        "b.txt",
+        b"caf\xC3\x83\xC2\xA9 r\xC3\x83\xC2\xA9sum\xC3\x83\xC2\xA9\n",
+    );
+    assert!(stdout(&run(&["info", g.to_str().unwrap()])).contains("mojibake"));
+}
+
+/// An ordinary text file is unaffected by any of the above: it still gets the
+/// full report, dominant line ending and all.
+#[test]
+fn text_files_keep_the_whole_report() {
+    let sb = Sandbox::new("binaryeol");
+    let g = sb.file("b.txt", b"abcd\ne\nf\n");
+    let text = stdout(&run(&["info", g.to_str().unwrap()]));
+    assert!(text.contains("line endings:    lf ("), "{text}");
+    assert!(text.contains("edit safety:     byte-exact"), "{text}");
+    assert!(!text.contains("not text:"), "{text}");
+}
+
+/// High-entropy data with no NUL in it: the case the old NUL-only check let
+/// through.
+#[test]
+fn binary_without_nul_bytes_is_refused() {
+    let sb = Sandbox::new("binarynonul");
+    let mut data = Vec::new();
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    while data.len() < 4000 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let b = (state >> 33) as u8;
+        if b != 0 {
+            data.push(b);
+        }
+    }
+    let f = sb.file("a.bin", &data);
+    let out = run(&["view", f.to_str().unwrap()]);
+    assert_eq!(code(&out), 5);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("control characters"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// UTF-16 with no BOM is text nothing declared the encoding of, not binary.
+/// The refusal has to name the flag that fixes it, or it is a dead end:
+/// detection cannot find UTF-16 unaided.
+#[test]
+fn bom_less_utf16_is_refused_with_the_encoding_that_reads_it() {
+    let sb = Sandbox::new("utf16nobom");
+    let bytes: Vec<u8> = "héllo wörld\nsecond line\n"
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
+    let f = sb.file("a.txt", &bytes);
+    let p = f.to_str().unwrap();
+
+    let out = run(&["view", p]);
+    assert_eq!(code(&out), 5);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(err.contains("UTF-16LE with no BOM"), "{err}");
+    assert!(err.contains("--encoding utf-16le"), "{err}");
+
+    // And that flag really does read it.
+    let out = run(&["view", p, "--encoding", "utf-16le"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(stdout(&out), "héllo wörld\nsecond line\n");
+}
+
+/// A BOM'd UTF-16 file is ordinary text and must stay unaffected by all of
+/// the above - its bytes are half NULs.
+#[test]
+fn utf16_with_a_bom_is_not_treated_as_binary() {
+    let sb = Sandbox::new("utf16bom");
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend("héllo\n".encode_utf16().flat_map(|u| u.to_le_bytes()));
+    let f = sb.file("a.txt", &bytes);
+    let out = run(&["view", f.to_str().unwrap()]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(stdout(&out), "héllo\n");
+}
+
 #[test]
 fn missing_file_exits_eight() {
     let sb = Sandbox::new("missing");
@@ -1266,6 +1681,292 @@ fn no_guess_refuses_writes_to_undeclared_encodings() {
         ])),
         0
     );
+}
+
+/// A file with no non-ASCII byte reads identically under every ASCII superset,
+/// so nothing in it says which one the project means it to be. `info` says as
+/// much rather than claiming a UTF-8 detection it did not make.
+#[test]
+fn a_pure_ascii_file_reports_that_nothing_was_detected() {
+    let sb = Sandbox::new("asciidetect");
+    let f = sb.file("a.txt", b"plain text\n");
+    let p = f.to_str().unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&stdout(&run(&["info", p, "--json"]))).unwrap();
+    assert_eq!(v["encoding"], "UTF-8");
+    assert_eq!(v["detected_by"], "ascii");
+
+    // The human report has to name the encoding a write would use, but must not
+    // call it a detection: being ASCII is the evidence that nothing was
+    // detected. ("US-ASCII" cannot stand in for the name either — that is what
+    // `--encoding ascii` mandates, and nothing here mandated it.)
+    let text = stdout(&run(&["info", p]));
+    assert!(
+        text.contains("encoding:        UTF-8 (assumed - every byte is ASCII)"),
+        "{text}"
+    );
+    assert!(!text.contains("detected by: ascii"), "{text}");
+
+    // One non-ASCII byte is a real detection, and reported as one.
+    let g = sb.file("b.txt", "héllo\n".as_bytes());
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout(&run(&["info", g.to_str().unwrap(), "--json"]))).unwrap();
+    assert_eq!(v["detected_by"], "utf-8-valid");
+}
+
+/// The write that turns an undeclared ASCII file into a file of some definite
+/// encoding: the only moment the missing --encoding changes the bytes on disk.
+#[test]
+fn writing_non_ascii_into_an_undeclared_ascii_file() {
+    let sb = Sandbox::new("asciiguard");
+    let f = sb.file("a.txt", b"cafe\n");
+    let p = f.to_str().unwrap();
+
+    // Under the mandate flag it is a refusal, and nothing is written.
+    let out = run(&[
+        "--no-guess",
+        "replace",
+        p,
+        "--find",
+        "cafe",
+        "--with",
+        "café",
+    ]);
+    assert_eq!(code(&out), 5);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("never observed"), "stderr was: {err}");
+    assert!(err.contains("--encoding"), "stderr was: {err}");
+    assert_eq!(read(&f), b"cafe\n".to_vec());
+
+    // An ASCII-only edit to the same file is unaffected: every encoding it
+    // could be agrees about those bytes.
+    assert_eq!(
+        code(&run(&[
+            "--no-guess",
+            "replace",
+            p,
+            "--find",
+            "cafe",
+            "--with",
+            "tea"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"tea\n".to_vec());
+
+    // Declaring the encoding is what the refusal asked for, and settles it.
+    let g = sb.file("b.txt", b"cafe\n");
+    let out = run(&[
+        "--encoding",
+        "windows-1252",
+        "--no-guess",
+        "replace",
+        g.to_str().unwrap(),
+        "--find",
+        "cafe",
+        "--with",
+        "café",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&g), b"caf\xE9\n".to_vec());
+
+    // Without --no-guess the write proceeds — but says what it decided.
+    let h = sb.file("c.txt", b"cafe\n");
+    let out = run(&[
+        "replace",
+        h.to_str().unwrap(),
+        "--find",
+        "cafe",
+        "--with",
+        "café",
+    ]);
+    assert_eq!(code(&out), 0);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("warning"), "stderr was: {err}");
+    assert!(err.contains("UTF-8 from here on"), "stderr was: {err}");
+    assert_eq!(read(&h), "café\n".as_bytes().to_vec());
+}
+
+/// `--encoding ascii` is the standing version of that guard: it says the file
+/// must stay ASCII, so the character is refused however it was arrived at,
+/// rather than the flag quietly meaning windows-1252 as the WHATWG label does.
+#[test]
+fn declaring_ascii_refuses_every_non_ascii_write() {
+    let sb = Sandbox::new("asciimandate");
+    let f = sb.file("a.txt", b"cafe\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&[
+        "-e", "ascii", "replace", p, "--find", "cafe", "--with", "café",
+    ]);
+    assert_eq!(code(&out), 5);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("US-ASCII"), "stderr was: {err}");
+    assert!(err.contains("U+00E9"), "stderr was: {err}");
+    assert_eq!(read(&f), b"cafe\n".to_vec());
+
+    // The label is a declaration, so the file reports as declared, not guessed.
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout(&run(&["-e", "ascii", "info", p, "--json"]))).unwrap();
+    assert_eq!(v["encoding"], "US-ASCII");
+    assert_eq!(v["detected_by"], "explicit");
+
+    // Its aliases mean the same thing, and ASCII-only edits still go through.
+    for label in ["us-ascii", "ANSI_X3.4-1968", "iso646-us"] {
+        let out = run(&[
+            "-e", label, "replace", p, "--find", "cafe", "--with", "café",
+        ]);
+        assert_eq!(code(&out), 5, "label {label}");
+    }
+    assert_eq!(
+        code(&run(&[
+            "-e", "ascii", "replace", p, "--find", "cafe", "--with", "tea"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"tea\n".to_vec());
+
+    // Naming an encoding that has the character is what gets it in - the whole
+    // point of the refusal being that the caller chooses which encoding that is.
+    let out = run(&[
+        "-e",
+        "windows-1252",
+        "replace",
+        p,
+        "--find",
+        "tea",
+        "--with",
+        "café",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), b"caf\xE9\n".to_vec());
+
+    // And that file is no longer editable as ASCII at all.
+    let out = run(&[
+        "-e", "ascii", "replace", p, "--find", "caf", "--with", "tea",
+    ]);
+    assert_eq!(code(&out), 5);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not ASCII"), "stderr was: {err}");
+}
+
+/// `convert --to ascii` is the same rule applied to a whole file: a check that
+/// it is ASCII, or - with --unmappable - a way to make it so.
+#[test]
+fn converting_to_ascii_reports_what_does_not_fit() {
+    let sb = Sandbox::new("asciiconvert");
+    let f = sb.file("a.txt", "café\n".as_bytes());
+    let p = f.to_str().unwrap();
+
+    let out = run(&["convert", p, "--to", "ascii"]);
+    assert_eq!(code(&out), 5);
+    assert_eq!(read(&f), "café\n".as_bytes().to_vec());
+
+    // ASCII has no byte-order mark, so asking for one is a usage error rather
+    // than a silently dropped flag.
+    assert_eq!(
+        code(&run(&["convert", p, "--to", "ascii", "--bom", "add"])),
+        2
+    );
+
+    let out = run(&["convert", p, "--to", "ascii", "--unmappable", "xml"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), b"caf&#233;\n".to_vec());
+}
+
+/// A batch is a transaction, so the guard has to stop it before any of its
+/// files are written, not after the operation that trips it.
+#[test]
+fn the_ascii_guard_covers_batch() {
+    let sb = Sandbox::new("asciibatch");
+    let a = sb.file("a.txt", b"one\n");
+    let b = sb.file("b.txt", b"two\n");
+    let script = sb.file(
+        "ops.json",
+        format!(
+            r#"[{{"op":"replace","file":{:?},"find":"one","with":"uno"}},
+                {{"op":"replace","file":{:?},"find":"two","with":"deux é"}}]"#,
+            a.display().to_string(),
+            b.display().to_string()
+        )
+        .as_bytes(),
+    );
+
+    let out = run(&["--no-guess", "batch", "--script", script.to_str().unwrap()]);
+    assert_eq!(code(&out), 5);
+    // The first operation succeeded and is still discarded.
+    assert_eq!(read(&a), b"one\n".to_vec());
+    assert_eq!(read(&b), b"two\n".to_vec());
+
+    // Without the flag it applies, with one warning naming the file it settled.
+    let out = run(&["batch", "--script", script.to_str().unwrap()]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(err.matches("warning").count(), 1, "stderr was: {err}");
+    assert!(err.contains("b.txt"), "stderr was: {err}");
+    assert_eq!(read(&a), b"uno\n".to_vec());
+}
+
+/// A regex `\n` matches a bare LF, so a pattern spanning lines finds nothing in
+/// a CRLF file. The literal path is shaped to the file's terminators and does
+/// not have the problem, which is exactly what makes the regex one surprising.
+#[test]
+fn a_regex_spanning_lines_explains_itself_on_a_crlf_file() {
+    let sb = Sandbox::new("crlfregex");
+    let f = sb.file("a.txt", b"alpha\r\nbeta\r\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&["search", p, "--regex", "--find", r"alpha\nbeta"]);
+    assert_eq!(code(&out), 3);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(r"\r?\n"), "stderr was: {err}");
+
+    // The same on the write side, as the hint of the no-match error.
+    let out = run(&[
+        "replace",
+        p,
+        "--regex",
+        "--find",
+        r"alpha\nbeta",
+        "--with",
+        "x",
+    ]);
+    assert_eq!(code(&out), 3);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(r"\r?\n"), "stderr was: {err}");
+
+    // And in JSON, where a caller reads it as a field rather than off stderr.
+    let out = run(&["--json", "search", p, "--regex", "--find", r"alpha\nbeta"]);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["count"], 0);
+    assert!(v["hint"].as_str().unwrap().contains(r"\r?\n"), "{v}");
+
+    // Taking the advice works.
+    let out = run(&["search", p, "--regex", "--find", r"alpha\r?\nbeta"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    // The hint is specific to this failure: it stays off when the pattern has
+    // already accounted for CR, when the file has no CRLF, and when a miss has
+    // nothing to do with line endings.
+    for args in [
+        vec!["search", p, "--regex", "--find", r"alpha\r?\nzzz"],
+        vec!["search", p, "--regex", "--find", r"zzz"],
+    ] {
+        let out = run(&args);
+        assert_eq!(code(&out), 3);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.contains("CRLF"), "{args:?} hinted: {err}");
+    }
+    let g = sb.file("b.txt", b"alpha\nbeta\n");
+    let out = run(&[
+        "search",
+        g.to_str().unwrap(),
+        "--regex",
+        "--find",
+        r"a\nzzz",
+    ]);
+    assert_eq!(code(&out), 3);
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("CRLF"));
 }
 
 /// The line-ending equivalent of the encoding mandate.
@@ -1583,6 +2284,7 @@ fn every_command_has_working_help() {
         "prepend",
         "delete",
         "replace-lines",
+        "move-lines",
         "write",
         "create",
         "convert",
@@ -1652,6 +2354,62 @@ fn guide_serves_the_whole_manual() {
 
     let out = run(&["guide", "nonsense"]);
     assert_eq!(code(&out), 2);
+}
+
+/// The manual is one source rendered two ways. This checks the Markdown way
+/// carries the same content as the terminal one and is structurally sound —
+/// MANUAL.md is this output, and CI only checks that the file matches the
+/// binary, not that either is any good.
+#[test]
+fn guide_renders_the_same_manual_as_markdown() {
+    let all = stdout(&run(&["guide", "--markdown"]));
+    assert!(all.starts_with("# intact — full manual"));
+
+    // Every topic is present as a real heading rather than fenced text.
+    for topic in ["overview", "encoding", "exit-codes", "batch", "recipes"] {
+        assert!(
+            all.contains(&format!("*`intact guide {topic}`*")),
+            "markdown manual omits `{topic}`"
+        );
+    }
+
+    // Fences have to pair up, or the rest of the file renders as code.
+    let fences = all.lines().filter(|l| l.starts_with("```")).count();
+    assert_eq!(
+        fences % 2,
+        0,
+        "unbalanced code fences in the markdown manual"
+    );
+
+    // Structure that only the block renderer can produce.
+    assert!(
+        all.contains("| Code | Meaning |"),
+        "exit codes are not a table"
+    );
+    assert!(
+        all.contains("### Detection order"),
+        "no markdown subheading"
+    );
+    assert!(
+        !all.contains("{#"),
+        "raw anchor syntax leaked into the output"
+    );
+
+    // Both renderings say the same things, whatever the markup around them.
+    for topic in ["overview", "exit-codes"] {
+        let one = stdout(&run(&["guide", "--markdown", topic]));
+        let plain = stdout(&run(&["guide", topic]));
+        for needle in ["intact", "file"] {
+            assert!(one.contains(needle) && plain.contains(needle));
+        }
+        assert!(
+            one.len() > 200,
+            "`guide --markdown {topic}` is suspiciously short"
+        );
+    }
+
+    // --markdown is about rendering, and has nothing to say about the index.
+    assert_eq!(code(&run(&["guide", "--markdown", "--list"])), 2);
 }
 
 #[test]

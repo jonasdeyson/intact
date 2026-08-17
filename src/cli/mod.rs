@@ -2,6 +2,10 @@ use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
+mod globals;
+
+use globals::hide_unused_globals;
+
 use crate::encoding_util::UnmappablePolicy;
 use crate::lines::{EolMode, LineRange, LineSpec};
 
@@ -34,7 +38,7 @@ TEXT INPUT:
   interprets \\n, \\t, \\uXXXX in --text, --find and --with - and in text read
   from a file - so multi-line content fits in one argument.
 
-LINE RANGES (--lines, --line, --after), 1-based and inclusive:
+LINE RANGES (--lines, --line, --after, --before), 1-based and inclusive:
   7  5:9  5:  :9  $  3:$  -1  -3:-1
 
 EXAMPLES:
@@ -46,6 +50,7 @@ EXAMPLES:
   intact insert README.md --line 3 --text 'a new line'
   intact delete legacy.txt --lines 10:20
   intact replace-lines main.rs --lines 5:7 --text-file /tmp/block.txt
+  intact move-lines main.rs --lines 40:52 --after 12
   intact convert legacy.txt --to utf-8
   intact --show-diff replace app.py --find x --with y   # global flags first
   intact batch --script ops.json                        # many edits, many files
@@ -90,7 +95,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub backup: bool,
 
-    /// Force the file's encoding instead of detecting it (e.g. windows-1252, latin1, shift_jis)
+    /// Force the file's encoding instead of detecting it (e.g. windows-1252, latin1, shift_jis;
+    /// ascii means ASCII itself and refuses to write anything above U+007F)
     #[arg(long, short = 'e', global = true, value_name = "LABEL")]
     pub encoding: Option<String>,
 
@@ -119,7 +125,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub lossy: bool,
 
-    /// Edit even when the file looks binary (contains NUL bytes)
+    /// Read or edit even when the file does not look like text
     #[arg(long, global = true)]
     pub force: bool,
 
@@ -129,116 +135,6 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Command,
-}
-
-// ------------------------------------------------- per-command global help
-//
-// The global options are declared once, on `Cli`, so that each one parses in
-// either position: `intact --show-diff replace FILE ...` and
-// `intact replace FILE ... --show-diff` mean the same thing. What clap charges
-// for that is listing all fourteen of them under every subcommand, so
-// `intact info --help` advertises --backup, --dry-run and --unmappable, none of
-// which `info` reads.
-//
-// The table below says which globals each command actually honours, and
-// `hide_unused_globals` hides the rest from that command's help. Only the help
-// text changes: every global still parses everywhere, so a caller that puts
-// `--encoding LABEL --no-guess` in front of every command uniformly - which
-// `intact instructions --encoding LABEL` tells it to do - keeps working.
-
-/// Every global option, by field name. `globals_table_is_complete` keeps this
-/// in step with the struct above.
-const ALL_GLOBALS: &[&str] = &[
-    "json",
-    "dry_run",
-    "show_diff",
-    "diff_context",
-    "backup",
-    "encoding",
-    "unmappable",
-    "eol",
-    "strict_eol",
-    "escapes",
-    "no_guess",
-    "lossy",
-    "force",
-    "quiet",
-];
-
-/// Opening a file at all, and reporting what happened.
-const FILE: &[&str] = &["json", "encoding"];
-/// Writing one: preview it, and say less about it.
-const WRITE: &[&str] = &["dry_run", "show_diff", "diff_context", "quiet"];
-/// Keeping the previous contents of a file that already existed.
-const BACKUP: &[&str] = &["backup"];
-/// The guards that refuse to write to an existing file, and their overrides.
-const GUARD: &[&str] = &["no_guess", "force", "lossy"];
-/// Encoding text intact adds into the file's own encoding.
-const ENCODE: &[&str] = &["unmappable"];
-/// Line endings for text intact adds.
-const EOL: &[&str] = &["eol"];
-/// Enforcing one line-ending style, which needs `--eol` to name it.
-const MANDATE: &[&str] = &["eol", "strict_eol"];
-/// Backslash escapes in `--text`, `--find` and `--with`.
-const ESCAPES: &[&str] = &["escapes"];
-
-/// The groups each subcommand honours. Everything else is hidden from its help.
-#[rustfmt::skip]
-const GLOBALS_BY_COMMAND: &[(&str, &[&[&str]])] = &[
-    ("info",          &[FILE]),
-    ("view",          &[FILE]),
-    ("search",        &[FILE, ESCAPES]),
-    ("replace",       &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
-    ("insert",        &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
-    ("append",        &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
-    ("prepend",       &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
-    ("replace-lines", &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE, ESCAPES]),
-    // Replaces the whole content, so --strict-eol has nothing to enforce: the
-    // output is compliant whatever the file held before. Same as `create`.
-    ("write",         &[FILE, WRITE, BACKUP, GUARD, ENCODE, EOL, ESCAPES]),
-    // Deletes nothing but whole lines: no new text is encoded, and there is no
-    // --text to unescape. --strict-eol still guards the write.
-    ("delete",        &[FILE, WRITE, BACKUP, GUARD, MANDATE]),
-    // The file cannot already exist, so there is nothing to back up, nothing
-    // whose encoding was guessed, and no existing line endings to enforce.
-    ("create",        &[FILE, WRITE, ENCODE, EOL, ESCAPES]),
-    // Line endings are `convert --newlines`, not the global --eol.
-    ("convert",       &[FILE, WRITE, BACKUP, GUARD, ENCODE]),
-    // Text comes from JSON, which has escapes of its own.
-    ("batch",         &[FILE, WRITE, BACKUP, GUARD, ENCODE, MANDATE]),
-    ("guide",         &[&["json"]]),
-    // --encoding and --eol are read as "this project mandates X" and end up in
-    // the generated text.
-    ("instructions",  &[&["encoding", "eol"]]),
-];
-
-fn hide_unused_globals(mut cmd: clap::Command) -> clap::Command {
-    // Globals live on the parent until `build` copies them into each
-    // subcommand, and it is those copies that a subcommand's help renders - so
-    // the hiding has to happen after the build. `mut_args` is the only way to
-    // reach them at that point: it rewrites the arguments in place, where
-    // anything that removes and re-adds one (`mut_arg`) leaves clap's
-    // long-flag lookup table pointing at the wrong arguments.
-    cmd.build();
-    for sub in cmd.get_subcommands_mut() {
-        let name = sub.get_name().to_owned();
-        // Anything absent from the table - clap's own `help` subcommand - is
-        // left as it is.
-        let Some((_, groups)) = GLOBALS_BY_COMMAND.iter().find(|(n, _)| *n == name) else {
-            continue;
-        };
-        let shown: Vec<&str> = groups.iter().flat_map(|g| g.iter().copied()).collect();
-        let built = std::mem::take(sub);
-        *sub = built.mut_args(|arg| {
-            let id = arg.get_id().as_str();
-            if ALL_GLOBALS.contains(&id) && !shown.contains(&id) {
-                arg.hide(true)
-            } else {
-                arg
-            }
-        });
-    }
-    cmd
 }
 
 /// `Cli::parse()` with the per-command help filtering applied.
@@ -368,6 +264,29 @@ pub enum Command {
     )]
     ReplaceLines(ReplaceLinesArgs),
 
+    /// Move a range of lines somewhere else in the same file
+    #[command(
+        name = "move-lines",
+        long_about = "Move a range of lines somewhere else in the same file.\n\n\
+                      --lines picks the block; --after N, --before N or --by K says where it \
+                      goes. The destination is named in the file's CURRENT numbering - the \
+                      numbers `view --number` prints - not the numbering left behind once the \
+                      block has been lifted out. --by K is the same move stated relatively: the \
+                      block's first line ends up K lines further down (negative K moves it up).\n\n\
+                      A destination inside the block is a usage error, since a block cannot be \
+                      moved into itself; one that names where the block already is changes \
+                      nothing and reports `unchanged`. The moved lines keep their own line \
+                      terminators, and the file keeps its final newline - or its lack of one - \
+                      whichever end of the file the block came from.",
+        after_help = "EXAMPLES:\n  \
+                      intact move-lines app.py --lines 40:52 --after 12\n  \
+                      intact move-lines app.py --lines 40:52 --before 1    # to the top\n  \
+                      intact move-lines app.py --lines 40:52 --after $     # to the end\n  \
+                      intact move-lines app.py --lines 7 --by -3           # up three lines\n  \
+                      intact move-lines app.py --lines 7:9 --by 5          # down five lines\n"
+    )]
+    MoveLines(MoveLinesArgs),
+
     /// Replace the entire contents of a file, keeping its encoding
     #[command(
         long_about = "Replace the entire contents of a file, keeping its encoding.\n\n\
@@ -475,6 +394,10 @@ pub struct GuideArgs {
     /// List the available topics
     #[arg(long, short = 'l', conflicts_with = "topic")]
     pub list: bool,
+
+    /// Print the manual as Markdown rather than as terminal text
+    #[arg(long, short = 'm', conflicts_with = "list")]
+    pub markdown: bool,
 }
 
 #[derive(Args, Debug)]
@@ -733,6 +656,44 @@ pub struct ReplaceLinesArgs {
     pub text: TextSource,
 }
 
+/// A move has to say where the block goes, so the three destination forms are
+/// one required, mutually exclusive group - the same shape as `insert`'s
+/// `--line`/`--after`. (`batch` builds these args from JSON, which clap never
+/// sees, so `ops::move_lines` still checks for itself.)
+#[derive(Args, Debug)]
+#[command(group = ArgGroup::new("destination").required(true).args(["after", "before", "by"]))]
+pub struct MoveLinesArgs {
+    /// File to edit
+    pub file: PathBuf,
+
+    /// Lines to move, e.g. 5, 5:9, 3:$, -3:-1
+    #[arg(long, short = 'l', value_name = "RANGE", allow_hyphen_values = true)]
+    pub lines: LineRange,
+
+    /// Put the block after this line, numbered as the file is now
+    #[arg(long, short = 'a', value_name = "LINE", allow_hyphen_values = true)]
+    pub after: Option<LineSpec>,
+
+    /// Put the block before this line, numbered as the file is now (one past
+    /// the last line means the end of the file)
+    #[arg(long, short = 'b', value_name = "LINE", allow_hyphen_values = true)]
+    pub before: Option<LineSpec>,
+
+    /// Move the block this many lines down; a negative number moves it up
+    #[arg(long, value_name = "K", allow_hyphen_values = true, value_parser = nonzero)]
+    pub by: Option<i64>,
+}
+
+/// `--by 0` names no movement, exactly as `--occurrence 0` names no
+/// occurrence, so it is rejected as an argument rather than as a result.
+fn nonzero(value: &str) -> Result<i64, String> {
+    match value.parse::<i64>() {
+        Ok(0) => Err("0 moves the block nowhere; pass a non-zero number of lines".to_string()),
+        Ok(n) => Ok(n),
+        Err(_) => Err(format!("`{value}` is not a whole number")),
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct ConvertArgs {
     /// File to convert
@@ -769,74 +730,4 @@ pub struct BatchArgs {
     /// JSON script describing the operations ("-" for standard input)
     #[arg(long, short = 's', value_name = "PATH")]
     pub script: PathBuf,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashSet;
-
-    fn global_ids() -> HashSet<String> {
-        Cli::command()
-            .get_arguments()
-            .filter(|a| a.is_global_set())
-            .map(|a| a.get_id().to_string())
-            .collect()
-    }
-
-    /// A global that nothing lists is invisible everywhere; an id that is not a
-    /// global (a typo, or a renamed field) makes `mut_arg` panic at startup.
-    #[test]
-    fn globals_table_is_complete() {
-        let actual = global_ids();
-        let listed: HashSet<String> = ALL_GLOBALS.iter().map(|s| s.to_string()).collect();
-        assert_eq!(actual, listed, "ALL_GLOBALS is out of step with Cli");
-
-        for (name, groups) in GLOBALS_BY_COMMAND {
-            for id in groups.iter().flat_map(|g| g.iter()) {
-                assert!(
-                    listed.contains(*id),
-                    "{name}: '{id}' is not a global option"
-                );
-            }
-        }
-    }
-
-    /// Every subcommand needs an entry, or it keeps the unfiltered list.
-    #[test]
-    fn every_subcommand_is_in_the_table() {
-        for sub in Cli::command().get_subcommands() {
-            let name = sub.get_name();
-            assert!(
-                GLOBALS_BY_COMMAND.iter().any(|(n, _)| *n == name),
-                "{name} is missing from GLOBALS_BY_COMMAND"
-            );
-        }
-    }
-
-    #[test]
-    fn irrelevant_globals_are_hidden_but_still_parse() {
-        let cmd = hide_unused_globals(Cli::command());
-        let info = cmd
-            .get_subcommands()
-            .find(|s| s.get_name() == "info")
-            .expect("info subcommand");
-        let hidden: HashSet<&str> = info
-            .get_arguments()
-            .filter(|a| a.is_hide_set())
-            .map(|a| a.get_id().as_str())
-            .collect();
-        assert!(hidden.contains("backup"));
-        assert!(hidden.contains("dry_run"));
-        assert!(!hidden.contains("json"));
-        assert!(!hidden.contains("encoding"));
-
-        // Hiding is a help-only change: the flag is still accepted, in either
-        // position, so existing scripts keep working.
-        let cmd = hide_unused_globals(Cli::command());
-        let matches = cmd
-            .try_get_matches_from(["intact", "info", "--backup", "f.txt"])
-            .expect("--backup still parses on info");
-        assert!(Cli::from_arg_matches(&matches).unwrap().backup);
-    }
 }
