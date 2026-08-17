@@ -5,7 +5,11 @@ All notable changes to this project are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-[Unreleased]
+## [Unreleased]
+
+TODO
+
+## [0.4.0] - 2026-08-16
 
 ### Added
 
@@ -77,6 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and reports `unchanged`.
 - `batch` gains the matching `move-lines` op (`lines`, and one of `after`,
   `before`, `by`).
+- BOM-less UTF-16 is recognised as its own case rather than reported as
+  binary. Nothing declares the encoding of such a file and detection cannot
+  guess it, so it used to be a dead end; the refusal now names the flag that
+  reads it (`pass --encoding utf-16le ...`).
+- `intact guide --markdown` prints the manual as Markdown rather than as
+  terminal text, for the whole manual or for one topic. `MANUAL.md` is exactly
+  this output and nothing else, so `scripts/gen-manual.sh` is now a single
+  redirect rather than a heredoc wrapping the text in a code fence.
 
 ### Changed
 
@@ -116,23 +128,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it up constantly by chance — `/bin/ls` yielded 93 such sequences, `libc.so.6`
   1581 — and its advice, to report the damage rather than hand-fix it, is not
   advice about an ELF binary. This covers a `--force`d write as well as `info`.
-
-### Added
-
-- BOM-less UTF-16 is recognised as its own case rather than reported as
-  binary. Nothing declares the encoding of such a file and detection cannot
-  guess it, so it used to be a dead end; the refusal now names the flag that
-  reads it (`pass --encoding utf-16le ...`).
-
-### Added
-
-- `intact guide --markdown` prints the manual as Markdown rather than as
-  terminal text, for the whole manual or for one topic. `MANUAL.md` is exactly
-  this output and nothing else, so `scripts/gen-manual.sh` is now a single
-  redirect rather than a heredoc wrapping the text in a code fence.
-
-### Changed
-
 - The manual's source is structured. A section body used to be one blob of
   pre-formatted text, which meant `MANUAL.md` could only ever be that blob
   fenced whole — a Markdown file containing no Markdown. Bodies are now lists
@@ -303,7 +298,8 @@ can make a whole changeset.
 
 Initial release.
 
-[Unreleased]: https://github.com/jonasdeyson/intact/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jonasdeyson/intact/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jonasdeyson/intact/compare/v0.4.0...v0.3.0
 [0.3.0]: https://github.com/jonasdeyson/intact/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jonasdeyson/intact/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jonasdeyson/intact/releases/tag/v0.1.0

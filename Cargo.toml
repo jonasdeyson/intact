@@ -1,6 +1,6 @@
 [package]
 name = "intact"
-version = "0.3.1-dev"
+version = "0.5.0-dev"
 edition = "2024"
 rust-version = "1.85"
 description = "An encoding-preserving command-line text editor."
