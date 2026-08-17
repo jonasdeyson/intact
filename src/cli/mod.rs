@@ -95,7 +95,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub backup: bool,
 
-    /// Force the file's encoding instead of detecting it (e.g. windows-1252, latin1, shift_jis)
+    /// Force the file's encoding instead of detecting it (e.g. windows-1252, latin1, shift_jis;
+    /// ascii means ASCII itself and refuses to write anything above U+007F)
     #[arg(long, short = 'e', global = true, value_name = "LABEL")]
     pub encoding: Option<String>,
 

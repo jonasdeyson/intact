@@ -247,9 +247,9 @@ so rather than printing nothing.
 explicit, bom, ascii, utf-8-valid, guessed, or default (empty/new file).
 `ascii` is the absence of a detection rather than one of them, so the human
 report words it as such: `UTF-8 (assumed - every byte is ASCII)`. UTF-8 is
-still named there because it is what a write would encode new text in — and
-because `--encoding ascii` is not a way to say this: the WHATWG label `ascii`
-resolves to windows-1252.
+still named there because it is what a write would encode new text in. That
+is a default, not a reading of the file, and `--encoding ascii` is how you
+refuse it: see ASCII AS A MANDATE below.
 
 Step 4 is a validity check, not a verification. Every single-byte encoding
 decodes every byte sequence, so bytes that are valid UTF-8 may equally be a
@@ -317,7 +317,10 @@ and it covers `detected_by: ascii` at the one moment that reading can be wrong:
 an ASCII file reads the same under every ASCII superset, so a write that adds
 no non-ASCII character is safe whatever the project's encoding is, and a write
 that adds one is refused unless `--encoding` says which encoding to add it in.
-Without `--no-guess` that write proceeds and reports a warning.
+Without `--no-guess` that write proceeds and reports a warning. `--encoding
+ascii` refuses that write outright, on any file — the flag is a decision that
+the character does not belong there at all, rather than a question of which
+byte to write it as.
 
 It does not fire on `utf-8-valid` — a file with non-ASCII bytes that decode as
 UTF-8. That is an inference too, and a wrong one for a windows-1252 file whose
@@ -352,6 +355,41 @@ was guessed rather than declared.
 When a project's encoding is known, pass `--encoding`, and add `--no-guess` so
 a missed flag fails loudly instead of falling back to a guess.
 
+### Ascii as a mandate
+
+`--encoding ascii` means ASCII itself. The file is read as ASCII, and any write
+that would add a character above U+007F fails with exit 5 instead of picking a
+byte for it:
+
+```bash
+intact -e ascii replace conf.ini --find naive --with naïve
+# intact: character 'ï' (U+00EF) cannot be represented in US-ASCII    -> exit 5
+```
+
+That is a deliberate departure from the WHATWG standard, which has no ASCII
+encoding at all: there `ascii`, `us-ascii` and `ansi_x3.4-1968` are labels for
+windows-1252, so the command above would have written byte 0xEF and reported
+success. A flag named after ASCII that quietly means a superset of it is worse
+than no flag, so intact resolves those labels to ASCII proper and names it
+`US-ASCII` in every report.
+
+Use it for a file that has to stay in the ASCII range whatever the rest of the
+project is, and for the case detection cannot settle: a file whose every byte
+is ASCII is every ASCII superset at once, and `--encoding ascii` is how you say
+it should remain so rather than becoming whichever encoding the first accented
+character lands in.
+
+Getting such a character in is then a matter of naming an encoding that has it —
+`--encoding utf-8`, `--encoding windows-1252` — which makes it a decision about
+the file rather than a default. `--unmappable` still applies if transliterating
+is what you want: `--unmappable xml` writes `&#239;`, and `convert FILE --to
+ascii --unmappable xml` does it for a whole file.
+
+A file that already contains bytes above 0x7F is refused under `--encoding
+ascii` before any edit is attempted: it is not an ASCII file, and saying so is
+more useful than treating the flag as being about the new text only. Run
+`intact info FILE` without the flag to see what detection makes of those bytes.
+
 ### Labels
 
 Labels follow the WHATWG Encoding Standard: utf-8, utf-16le, utf-16be,
@@ -360,11 +398,15 @@ koi8-r, koi8-u, macintosh, x-mac-cyrillic, ibm866, gbk, gb18030, big5, euc-jp,
 shift_jis, iso-2022-jp, euc-kr, and their usual aliases (latin1, cp1252, ...).
 The complete list this build accepts is at the end of this topic.
 
-Two things worth knowing:
+Three things worth knowing:
 
 - Per the standard, latin1 / iso-8859-1 resolve to windows-1252, which differs
   from strict ISO 8859-1 only in how bytes 0x80-0x9F are named. Both
   round-trip, so the bytes on disk are unaffected either way.
+
+- ascii, us-ascii, ansi_x3.4-1968 and the other ASCII aliases do *not* follow
+  the standard here, which resolves them to windows-1252. They mean ASCII —
+  see ASCII AS A MANDATE above.
 
 - iso-2022-jp is stateful, so byte-exact splicing is unavailable for it. Such
   files need `--lossy`, which re-encodes the whole file.
@@ -376,6 +418,7 @@ intact convert FILE --to utf-8
 intact convert FILE --to utf-8 --bom remove
 intact convert FILE --to utf-16le            # a BOM is added automatically
 intact convert FILE --to utf-8 --newlines lf # also normalise line endings
+intact convert FILE --to ascii --unmappable xml # &#233; for anything not ASCII
 ```
 
 `--bom keep` (default) preserves whether the file had one; add and remove force
@@ -384,20 +427,20 @@ it. UTF-16 output always gets a BOM, since UTF-16 without one is undetectable.
 ### Every label this build accepts
 
 ```text
-utf-8           utf-16le        utf-16be        windows-1250
-windows-1251    windows-1252    windows-1253    windows-1254
-windows-1255    windows-1256    windows-1257    windows-1258
-windows-874     iso-8859-2      iso-8859-3      iso-8859-4
-iso-8859-5      iso-8859-6      iso-8859-7      iso-8859-8
-iso-8859-8-i    iso-8859-10     iso-8859-13     iso-8859-14
-iso-8859-15     iso-8859-16     koi8-r          koi8-u
-macintosh       x-mac-cyrillic  ibm866          gbk
-gb18030         big5            euc-jp          shift_jis
-iso-2022-jp     euc-kr
+ascii           utf-8           utf-16le        utf-16be
+windows-1250    windows-1251    windows-1252    windows-1253
+windows-1254    windows-1255    windows-1256    windows-1257
+windows-1258    windows-874     iso-8859-2      iso-8859-3
+iso-8859-4      iso-8859-5      iso-8859-6      iso-8859-7
+iso-8859-8      iso-8859-8-i    iso-8859-10     iso-8859-13
+iso-8859-14     iso-8859-15     iso-8859-16     koi8-r
+koi8-u          macintosh       x-mac-cyrillic  ibm866
+gbk             gb18030         big5            euc-jp
+shift_jis       iso-2022-jp     euc-kr
 ```
 
-Aliases such as latin1, latin-1, iso-8859-1, cp1252 and ansi_x3.4-1968 are
-accepted as well.
+Aliases such as latin1, latin-1, iso-8859-1 and cp1252 are accepted as well,
+as are us-ascii, ansi_x3.4-1968, iso646-us and the rest of the ASCII names.
 
 ## Line numbers and ranges
 

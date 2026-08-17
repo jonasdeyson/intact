@@ -26,6 +26,87 @@ pub enum UnmappablePolicy {
     Skip,
 }
 
+/// The character set a document is read and written in.
+///
+/// For every encoding but one this is just `encoding_rs`'s `Encoding`. ASCII is
+/// the exception, because the WHATWG standard has no ASCII encoding: `ascii`,
+/// `us-ascii` and `ansi_x3.4-1968` are all labels *for windows-1252*. Resolving
+/// them that way would make `--encoding ascii` a way of asking for
+/// windows-1252 under a name that promises the opposite - an edit inserting `é`
+/// would be accepted and written as the byte 0xE9, which is ASCII in no sense
+/// at all. So ASCII is carried here as its own charset: identical to UTF-8 over
+/// U+0000..=U+007F and holding nothing above it, which turns declaring it into
+/// a mandate the encoder enforces rather than a synonym for a superset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Charset {
+    enc: &'static Encoding,
+    /// Refuse every character above U+007F, whatever `enc` could represent.
+    ascii_only: bool,
+}
+
+impl Charset {
+    pub const ASCII: Charset = Charset {
+        enc: UTF_8,
+        ascii_only: true,
+    };
+
+    pub const fn new(enc: &'static Encoding) -> Charset {
+        Charset {
+            enc,
+            ascii_only: false,
+        }
+    }
+
+    /// The underlying `encoding_rs` encoding. ASCII reports UTF-8, which agrees
+    /// with it on every character ASCII has; the difference is only in what is
+    /// refused, and that is [`Charset::is_ascii_only`]'s business.
+    pub fn encoding(self) -> &'static Encoding {
+        self.enc
+    }
+
+    pub fn is_ascii_only(self) -> bool {
+        self.ascii_only
+    }
+
+    pub fn name(self) -> &'static str {
+        if self.ascii_only {
+            "US-ASCII"
+        } else {
+            self.enc.name()
+        }
+    }
+
+    /// The name as a `--encoding` label, for hints that quote one back.
+    pub fn label(self) -> String {
+        self.name().to_lowercase()
+    }
+
+    /// Decode file bytes, reporting whether anything was undecodable. Any BOM
+    /// has already been split off by the caller.
+    pub fn decode_without_bom_handling(self, bytes: &[u8]) -> (String, bool) {
+        if !self.ascii_only {
+            let (cow, had_errors) = self.enc.decode_without_bom_handling(bytes);
+            return (cow.into_owned(), had_errors);
+        }
+        // A byte above 0x7F is not ASCII, so under a declared ASCII it is
+        // undecodable — one U+FFFD each, as encoding_rs does for a malformed
+        // sequence. That flags the file as not round-trippable, so an edit to
+        // it is refused until the caller declares what it really is.
+        if bytes.is_ascii() {
+            return (String::from_utf8_lossy(bytes).into_owned(), false);
+        }
+        let mut out = String::with_capacity(bytes.len());
+        for &b in bytes {
+            out.push(if b.is_ascii() {
+                b as char
+            } else {
+                char::REPLACEMENT_CHARACTER
+            });
+        }
+        (out, true)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BomKind {
     Utf8,
@@ -54,7 +135,18 @@ impl BomKind {
         }
     }
 
-    pub fn for_encoding(enc: &'static Encoding) -> Option<BomKind> {
+    pub fn charset(self) -> Charset {
+        Charset::new(self.encoding())
+    }
+
+    /// The BOM that belongs to `cs`, if it has one. ASCII does not: a BOM is
+    /// U+FEFF, which ASCII cannot hold, and its bytes in any encoding are above
+    /// 0x7F.
+    pub fn for_charset(cs: Charset) -> Option<BomKind> {
+        if cs.is_ascii_only() {
+            return None;
+        }
+        let enc = cs.encoding();
         if enc == UTF_8 {
             Some(BomKind::Utf8)
         } else if enc == UTF_16LE {
@@ -82,9 +174,29 @@ pub fn sniff_bom(bytes: &[u8]) -> Option<BomKind> {
     }
 }
 
+/// Labels that name ASCII itself. WHATWG resolves every one of these to
+/// windows-1252, so they are intercepted before `Encoding::for_label` and mean
+/// what they say instead. See [`Charset`].
+const ASCII_LABELS: &[&str] = &[
+    "ascii",
+    "us-ascii",
+    "us_ascii",
+    "usascii",
+    "ansi_x3.4-1968",
+    "ansi_x3.4-1986",
+    "iso-ir-6",
+    "iso646-us",
+    "cp367",
+    "ibm367",
+    "csascii",
+];
+
 /// Resolve a user-supplied encoding label ("latin1", "cp1252", "utf-8", ...).
-pub fn encoding_for_label(label: &str) -> Result<&'static Encoding> {
+pub fn encoding_for_label(label: &str) -> Result<Charset> {
     let trimmed = label.trim();
+    if ASCII_LABELS.iter().any(|l| trimmed.eq_ignore_ascii_case(l)) {
+        return Ok(Charset::ASCII);
+    }
     if let Some(enc) = Encoding::for_label(trimmed.as_bytes()) {
         if enc == REPLACEMENT {
             return Err(AppError::new(
@@ -94,7 +206,7 @@ pub fn encoding_for_label(label: &str) -> Result<&'static Encoding> {
                 ),
             ));
         }
-        return Ok(enc);
+        return Ok(Charset::new(enc));
     }
     Err(AppError::new(
         ErrorKind::Usage,
@@ -105,8 +217,8 @@ pub fn encoding_for_label(label: &str) -> Result<&'static Encoding> {
 
 /// Encodings whose encoder carries state across characters. Splicing individual
 /// regions of the file is unsound for these, so the whole file is re-encoded.
-pub fn is_stateful(enc: &'static Encoding) -> bool {
-    enc == ISO_2022_JP
+pub fn is_stateful(cs: Charset) -> bool {
+    !cs.is_ascii_only() && cs.encoding() == ISO_2022_JP
 }
 
 /// Streaming encoder that reports unmappable characters instead of silently
@@ -116,14 +228,18 @@ pub struct StreamEncoder {
 }
 
 enum Inner {
+    Ascii,
     Utf8,
     Utf16 { be: bool },
     Legacy(Box<Encoder>),
 }
 
 impl StreamEncoder {
-    pub fn new(enc: &'static Encoding) -> Self {
-        let inner = if enc == UTF_8 {
+    pub fn new(cs: Charset) -> Self {
+        let enc = cs.encoding();
+        let inner = if cs.is_ascii_only() {
+            Inner::Ascii
+        } else if enc == UTF_8 {
             Inner::Utf8
         } else if enc == UTF_16LE {
             Inner::Utf16 { be: false }
@@ -140,6 +256,14 @@ impl StreamEncoder {
     /// encoding; any bytes emitted before the failure are still appended.
     pub fn push_char(&mut self, ch: char, out: &mut Vec<u8>) -> std::result::Result<(), char> {
         match &mut self.inner {
+            Inner::Ascii => {
+                if ch.is_ascii() {
+                    out.push(ch as u8);
+                    Ok(())
+                } else {
+                    Err(ch)
+                }
+            }
             Inner::Utf8 => {
                 let mut tmp = [0u8; 4];
                 out.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
@@ -189,12 +313,8 @@ impl StreamEncoder {
 }
 
 /// Encode a whole string under the given unmappable-character policy.
-pub fn encode_text(
-    enc: &'static Encoding,
-    text: &str,
-    policy: UnmappablePolicy,
-) -> Result<Vec<u8>> {
-    let mut encoder = StreamEncoder::new(enc);
+pub fn encode_text(cs: Charset, text: &str, policy: UnmappablePolicy) -> Result<Vec<u8>> {
+    let mut encoder = StreamEncoder::new(cs);
     let mut out = Vec::with_capacity(text.len());
     for ch in text.chars() {
         if encoder.push_char(ch, &mut out).is_err() {
@@ -206,13 +326,20 @@ pub fn encode_text(
                             "character {:?} (U+{:04X}) cannot be represented in {}",
                             ch,
                             ch as u32,
-                            enc.name()
+                            cs.name()
                         ),
                     )
-                    .with_hint(
+                    .with_hint(if cs.is_ascii_only() {
+                        // ASCII is only ever in play because someone asked for
+                        // it by name, so the fix is a different --encoding, not
+                        // a conversion of the file.
+                        "US-ASCII holds nothing above U+007F: pass an encoding that has this \
+                         character (--encoding utf-8, or the file's real legacy encoding), or \
+                         --unmappable replace|xml|skip"
+                    } else {
                         "convert the file first (`intact convert FILE --to utf-8`) or pass \
-                         --unmappable replace|xml|skip",
-                    ));
+                         --unmappable replace|xml|skip"
+                    }));
                 }
                 UnmappablePolicy::Replace => {
                     let _ = encoder.push_char('?', &mut out);
@@ -256,8 +383,8 @@ impl EncodedMap {
 /// Re-encode `text` character by character, recording offsets. Returns `None`
 /// if any character is unmappable (the caller then treats the document as not
 /// round-trippable).
-pub fn build_encoded_map(enc: &'static Encoding, text: &str) -> Option<EncodedMap> {
-    let mut encoder = StreamEncoder::new(enc);
+pub fn build_encoded_map(cs: Charset, text: &str) -> Option<EncodedMap> {
+    let mut encoder = StreamEncoder::new(cs);
     let mut encoded = Vec::with_capacity(text.len());
     let mut utf8_offsets = Vec::with_capacity(text.chars().count() + 1);
     let mut encoded_offsets = Vec::with_capacity(text.chars().count() + 1);
@@ -281,10 +408,10 @@ pub fn build_encoded_map(enc: &'static Encoding, text: &str) -> Option<EncodedMa
 }
 
 /// Guess the encoding of bytes that are not valid UTF-8 and carry no BOM.
-pub fn detect_legacy(bytes: &[u8]) -> &'static Encoding {
+pub fn detect_legacy(bytes: &[u8]) -> Charset {
     let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
     detector.feed(bytes, true);
-    detector.guess(None, chardetng::Utf8Detection::Allow)
+    Charset::new(detector.guess(None, chardetng::Utf8Detection::Allow))
 }
 
 /// A run of text shaped like mojibake: UTF-8 bytes read through a single-byte
@@ -367,6 +494,7 @@ pub fn scan_mojibake(text: &str) -> Option<MojibakeHint> {
 
 /// Labels advertised by `intact guide encoding`.
 pub const KNOWN_LABELS: &[&str] = &[
+    "ascii",
     "utf-8",
     "utf-16le",
     "utf-16be",

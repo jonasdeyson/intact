@@ -21,7 +21,7 @@ use atomic::ensure_parent_dir;
 use binary::BinaryPolicy;
 use cli::{BomMode, Cli, Command};
 use document::{Detection, Document, ForcedEncoding};
-use encoding_util::{BomKind, encode_text};
+use encoding_util::{BomKind, Charset, encode_text};
 use error::{AppError, ErrorKind, Result};
 use lines::{Eol, EolMode};
 use policy::{binary_policy, ctx_for, eol_mode, preflight, resolve_forced_encoding};
@@ -237,9 +237,9 @@ fn cmd_info(cli: &Cli, path: &Path, forced: Option<ForcedEncoding>) -> Result<i3
 
     // "detected by: ascii" would assert the one thing being ASCII rules out.
     // The encoding still has to be named — it is what a write would encode new
-    // text in, and the ASCII label is not a substitute for it: WHATWG maps
-    // `ascii` to windows-1252, so printing it here would invite an --encoding
-    // that quietly means something else. What changes is the claim made for it.
+    // text in — and US-ASCII is not a substitute for it: `--encoding ascii` is
+    // a mandate that the file stay ASCII, which is a claim about the project
+    // and not something the bytes can say. What changes is the claim made here.
     if doc.detection == Detection::Ascii {
         println!(
             "encoding:        {} (assumed - every byte is ASCII)",
@@ -550,7 +550,7 @@ fn cmd_convert(cli: &Cli, args: &cli::ConvertArgs, forced: Option<ForcedEncoding
 
     // Only the Unicode encodings have a byte-order mark. Silently dropping an
     // explicit --bom add would leave the caller believing the file is marked.
-    if args.bom == BomMode::Add && BomKind::for_encoding(target).is_none() {
+    if args.bom == BomMode::Add && BomKind::for_charset(target).is_none() {
         return Err(AppError::new(
             ErrorKind::Usage,
             format!("{} has no byte-order mark to add", target.name()),
@@ -559,14 +559,16 @@ fn cmd_convert(cli: &Cli, args: &cli::ConvertArgs, forced: Option<ForcedEncoding
     }
 
     let bom = match args.bom {
-        BomMode::Add => BomKind::for_encoding(target),
+        BomMode::Add => BomKind::for_charset(target),
         BomMode::Remove => None,
         BomMode::Keep => {
             if doc.bom.is_some() {
-                BomKind::for_encoding(target)
-            } else if target == encoding_rs::UTF_16LE || target == encoding_rs::UTF_16BE {
+                BomKind::for_charset(target)
+            } else if target == Charset::new(encoding_rs::UTF_16LE)
+                || target == Charset::new(encoding_rs::UTF_16BE)
+            {
                 // UTF-16 without a BOM is undetectable; always mark it.
-                BomKind::for_encoding(target)
+                BomKind::for_charset(target)
             } else {
                 None
             }

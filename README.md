@@ -188,7 +188,10 @@ Labels follow the [WHATWG Encoding Standard](https://encoding.spec.whatwg.org/):
 `utf-8`, `utf-16le`/`be`, `windows-1250`…`1258`, `iso-8859-2`…`16`, `koi8-r`,
 `koi8-u`, `macintosh`, `ibm866`, `gbk`, `gb18030`, `big5`, `euc-jp`,
 `shift_jis`, `iso-2022-jp`, `euc-kr` and their usual aliases — run `intact
-guide encoding` for the complete list this build accepts. What happens when a
+guide encoding` for the complete list this build accepts. One label departs
+from the standard: `ascii` (and `us-ascii`, `ansi_x3.4-1968`, …) means ASCII
+itself rather than windows-1252, so `--encoding ascii` refuses any write that
+would add a character above U+007F instead of quietly encoding it. What happens when a
 file doesn't round-trip, when text can't be represented, or when detection
 guesses wrong is covered in [Encodings](MANUAL.md#encodings) in the manual
 (same content as `intact guide encoding`).

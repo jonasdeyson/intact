@@ -280,9 +280,9 @@ git apply -p0 --check change.patch"#,
                  explicit, bom, ascii, utf-8-valid, guessed, or default (empty/new file).\n\
                  `ascii` is the absence of a detection rather than one of them, so the human\n\
                  report words it as such: `UTF-8 (assumed - every byte is ASCII)`. UTF-8 is\n\
-                 still named there because it is what a write would encode new text in — and\n\
-                 because `--encoding ascii` is not a way to say this: the WHATWG label `ascii`\n\
-                 resolves to windows-1252.",
+                 still named there because it is what a write would encode new text in. That\n\
+                 is a default, not a reading of the file, and `--encoding ascii` is how you\n\
+                 refuse it: see ASCII AS A MANDATE below.",
             ),
             Block::Prose(
                 "Step 4 is a validity check, not a verification. Every single-byte encoding\n\
@@ -359,7 +359,10 @@ line 1: text that was written through the wrong encoding at some point."#,
                  an ASCII file reads the same under every ASCII superset, so a write that adds\n\
                  no non-ASCII character is safe whatever the project's encoding is, and a write\n\
                  that adds one is refused unless `--encoding` says which encoding to add it in.\n\
-                 Without `--no-guess` that write proceeds and reports a warning.",
+                 Without `--no-guess` that write proceeds and reports a warning. `--encoding\n\
+                 ascii` refuses that write outright, on any file — the flag is a decision that\n\
+                 the character does not belong there at all, rather than a question of which\n\
+                 byte to write it as.",
             ),
             Block::Prose(
                 "It does not fire on `utf-8-valid` — a file with non-ASCII bytes that decode as\n\
@@ -399,6 +402,45 @@ line 1: text that was written through the wrong encoding at some point."#,
                 "When a project's encoding is known, pass `--encoding`, and add `--no-guess` so\n\
                  a missed flag fails loudly instead of falling back to a guess.",
             ),
+            Block::Heading("ASCII AS A MANDATE"),
+            Block::Prose(
+                "`--encoding ascii` means ASCII itself. The file is read as ASCII, and any write\n\
+                 that would add a character above U+007F fails with exit 5 instead of picking a\n\
+                 byte for it:",
+            ),
+            Block::Code {
+                lang: "bash",
+                text: r#"intact -e ascii replace conf.ini --find naive --with naïve
+# intact: character 'ï' (U+00EF) cannot be represented in US-ASCII    -> exit 5"#,
+            },
+            Block::Prose(
+                "That is a deliberate departure from the WHATWG standard, which has no ASCII\n\
+                 encoding at all: there `ascii`, `us-ascii` and `ansi_x3.4-1968` are labels for\n\
+                 windows-1252, so the command above would have written byte 0xEF and reported\n\
+                 success. A flag named after ASCII that quietly means a superset of it is worse\n\
+                 than no flag, so intact resolves those labels to ASCII proper and names it\n\
+                 `US-ASCII` in every report.",
+            ),
+            Block::Prose(
+                "Use it for a file that has to stay in the ASCII range whatever the rest of the\n\
+                 project is, and for the case detection cannot settle: a file whose every byte\n\
+                 is ASCII is every ASCII superset at once, and `--encoding ascii` is how you say\n\
+                 it should remain so rather than becoming whichever encoding the first accented\n\
+                 character lands in.",
+            ),
+            Block::Prose(
+                "Getting such a character in is then a matter of naming an encoding that has it —\n\
+                 `--encoding utf-8`, `--encoding windows-1252` — which makes it a decision about\n\
+                 the file rather than a default. `--unmappable` still applies if transliterating\n\
+                 is what you want: `--unmappable xml` writes `&#239;`, and `convert FILE --to\n\
+                 ascii --unmappable xml` does it for a whole file.",
+            ),
+            Block::Prose(
+                "A file that already contains bytes above 0x7F is refused under `--encoding\n\
+                 ascii` before any edit is attempted: it is not an ASCII file, and saying so is\n\
+                 more useful than treating the flag as being about the new text only. Run\n\
+                 `intact info FILE` without the flag to see what detection makes of those bytes.",
+            ),
             Block::Heading("LABELS"),
             Block::Prose(
                 "Labels follow the WHATWG Encoding Standard: utf-8, utf-16le, utf-16be,\n\
@@ -407,11 +449,14 @@ line 1: text that was written through the wrong encoding at some point."#,
                  shift_jis, iso-2022-jp, euc-kr, and their usual aliases (latin1, cp1252, ...).\n\
                  The complete list this build accepts is at the end of this topic.",
             ),
-            Block::Prose("Two things worth knowing:"),
+            Block::Prose("Three things worth knowing:"),
             Block::Bullets(&[
                 "Per the standard, latin1 / iso-8859-1 resolve to windows-1252, which differs\n\
                  from strict ISO 8859-1 only in how bytes 0x80-0x9F are named. Both\n\
                  round-trip, so the bytes on disk are unaffected either way.",
+                "ascii, us-ascii, ansi_x3.4-1968 and the other ASCII aliases do *not* follow\n\
+                 the standard here, which resolves them to windows-1252. They mean ASCII —\n\
+                 see ASCII AS A MANDATE above.",
                 "iso-2022-jp is stateful, so byte-exact splicing is unavailable for it. Such\n\
                  files need `--lossy`, which re-encodes the whole file.",
             ]),
@@ -421,7 +466,8 @@ line 1: text that was written through the wrong encoding at some point."#,
                 text: r#"intact convert FILE --to utf-8
 intact convert FILE --to utf-8 --bom remove
 intact convert FILE --to utf-16le            # a BOM is added automatically
-intact convert FILE --to utf-8 --newlines lf # also normalise line endings"#,
+intact convert FILE --to utf-8 --newlines lf # also normalise line endings
+intact convert FILE --to ascii --unmappable xml # &#233; for anything not ASCII"#,
             },
             Block::Prose(
                 "`--bom keep` (default) preserves whether the file had one; add and remove force\n\
@@ -434,8 +480,8 @@ intact convert FILE --to utf-8 --newlines lf # also normalise line endings"#,
             Block::Heading("EVERY LABEL THIS BUILD ACCEPTS"),
             Block::Labels(crate::encoding_util::KNOWN_LABELS),
             Block::Prose(
-                "Aliases such as latin1, latin-1, iso-8859-1, cp1252 and ansi_x3.4-1968 are\n\
-                 accepted as well.",
+                "Aliases such as latin1, latin-1, iso-8859-1 and cp1252 are accepted as well,\n\
+                 as are us-ascii, ansi_x3.4-1968, iso646-us and the rest of the ASCII names.",
             ),
         ],
     },

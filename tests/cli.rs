@@ -1698,8 +1698,8 @@ fn a_pure_ascii_file_reports_that_nothing_was_detected() {
 
     // The human report has to name the encoding a write would use, but must not
     // call it a detection: being ASCII is the evidence that nothing was
-    // detected. ("ASCII" cannot stand in for the name — the WHATWG label
-    // `ascii` means windows-1252, so it would invite the wrong flag.)
+    // detected. ("US-ASCII" cannot stand in for the name either — that is what
+    // `--encoding ascii` mandates, and nothing here mandated it.)
     let text = stdout(&run(&["info", p]));
     assert!(
         text.contains("encoding:        UTF-8 (assumed - every byte is ASCII)"),
@@ -1785,6 +1785,93 @@ fn writing_non_ascii_into_an_undeclared_ascii_file() {
     assert!(err.contains("warning"), "stderr was: {err}");
     assert!(err.contains("UTF-8 from here on"), "stderr was: {err}");
     assert_eq!(read(&h), "café\n".as_bytes().to_vec());
+}
+
+/// `--encoding ascii` is the standing version of that guard: it says the file
+/// must stay ASCII, so the character is refused however it was arrived at,
+/// rather than the flag quietly meaning windows-1252 as the WHATWG label does.
+#[test]
+fn declaring_ascii_refuses_every_non_ascii_write() {
+    let sb = Sandbox::new("asciimandate");
+    let f = sb.file("a.txt", b"cafe\n");
+    let p = f.to_str().unwrap();
+
+    let out = run(&[
+        "-e", "ascii", "replace", p, "--find", "cafe", "--with", "café",
+    ]);
+    assert_eq!(code(&out), 5);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("US-ASCII"), "stderr was: {err}");
+    assert!(err.contains("U+00E9"), "stderr was: {err}");
+    assert_eq!(read(&f), b"cafe\n".to_vec());
+
+    // The label is a declaration, so the file reports as declared, not guessed.
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout(&run(&["-e", "ascii", "info", p, "--json"]))).unwrap();
+    assert_eq!(v["encoding"], "US-ASCII");
+    assert_eq!(v["detected_by"], "explicit");
+
+    // Its aliases mean the same thing, and ASCII-only edits still go through.
+    for label in ["us-ascii", "ANSI_X3.4-1968", "iso646-us"] {
+        let out = run(&[
+            "-e", label, "replace", p, "--find", "cafe", "--with", "café",
+        ]);
+        assert_eq!(code(&out), 5, "label {label}");
+    }
+    assert_eq!(
+        code(&run(&[
+            "-e", "ascii", "replace", p, "--find", "cafe", "--with", "tea"
+        ])),
+        0
+    );
+    assert_eq!(read(&f), b"tea\n".to_vec());
+
+    // Naming an encoding that has the character is what gets it in - the whole
+    // point of the refusal being that the caller chooses which encoding that is.
+    let out = run(&[
+        "-e",
+        "windows-1252",
+        "replace",
+        p,
+        "--find",
+        "tea",
+        "--with",
+        "café",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), b"caf\xE9\n".to_vec());
+
+    // And that file is no longer editable as ASCII at all.
+    let out = run(&[
+        "-e", "ascii", "replace", p, "--find", "caf", "--with", "tea",
+    ]);
+    assert_eq!(code(&out), 5);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not ASCII"), "stderr was: {err}");
+}
+
+/// `convert --to ascii` is the same rule applied to a whole file: a check that
+/// it is ASCII, or - with --unmappable - a way to make it so.
+#[test]
+fn converting_to_ascii_reports_what_does_not_fit() {
+    let sb = Sandbox::new("asciiconvert");
+    let f = sb.file("a.txt", "café\n".as_bytes());
+    let p = f.to_str().unwrap();
+
+    let out = run(&["convert", p, "--to", "ascii"]);
+    assert_eq!(code(&out), 5);
+    assert_eq!(read(&f), "café\n".as_bytes().to_vec());
+
+    // ASCII has no byte-order mark, so asking for one is a usage error rather
+    // than a silently dropped flag.
+    assert_eq!(
+        code(&run(&["convert", p, "--to", "ascii", "--bom", "add"])),
+        2
+    );
+
+    let out = run(&["convert", p, "--to", "ascii", "--unmappable", "xml"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), b"caf&#233;\n".to_vec());
 }
 
 /// A batch is a transaction, so the guard has to stop it before any of its

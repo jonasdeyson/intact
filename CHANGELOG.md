@@ -17,9 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `info`'s human line words that as the absence of a detection rather than one
   of them — `encoding: UTF-8 (assumed - every byte is ASCII)` — since "detected
   by: ascii" would assert the very thing being ASCII rules out. The encoding is
-  still named, being what a write would encode new text in, and because
-  `--encoding ascii` is not a way to say this: the WHATWG label `ascii` resolves
-  to windows-1252. The `--json` field keeps the `ascii` token.
+  still named, being what a write would encode new text in; `US-ASCII` does not
+  stand in for it, because that is what `--encoding ascii` mandates and nothing
+  in the file mandated it. The `--json` field keeps the `ascii` token.
+- `--encoding ascii` now means ASCII itself. The WHATWG standard has no ASCII
+  encoding — `ascii`, `us-ascii`, `ansi_x3.4-1968`, `iso646-us` and the rest are
+  all labels *for windows-1252* — so the flag used to accept an edit inserting
+  `é` and write it as the byte 0xE9, which is ASCII in no sense at all. Those
+  labels now resolve to a charset of their own, reported as `US-ASCII`: it holds
+  the ASCII range and nothing above it, so a write that would introduce an
+  accented character fails with exit 5 and the caller has to name an encoding
+  that has it (`--encoding utf-8`, `--encoding windows-1252`) or ask for
+  `--unmappable replace|xml|skip`. **This changes what those labels mean**; every
+  other label still resolves through WHATWG exactly as before.
+- The mandate covers reading too: a file that already contains bytes above 0x7F
+  is refused under `--encoding ascii` with "has bytes above 0x7F, so it is not
+  ASCII" rather than a generic round-trip failure. `info` still describes it, as
+  it describes every file a write would refuse.
+- `convert FILE --to ascii` follows the same rule, so it is now a way to check a
+  file is ASCII (exit 5 naming the first character that is not) or to force it
+  to be: `--to ascii --unmappable xml` writes `&#233;` for what does not fit.
+  `--bom add` is refused for it, ASCII having no byte-order mark.
+- `intact guide encoding` lists `ascii` among the labels and gains an ASCII AS A
+  MANDATE section covering the above.
 - `--no-guess` now covers that case, at the one moment it can matter. An
   ASCII-only edit to an ASCII file is safe under every encoding the file might
   be, and is left alone; a write that adds a *non-ASCII* character is refused

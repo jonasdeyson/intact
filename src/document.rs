@@ -10,12 +10,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use encoding_rs::{Encoding, UTF_8};
+use encoding_rs::UTF_8;
 
 use crate::atomic::atomic_write;
 use crate::binary::{BinaryHint, BinaryPolicy, sniff_binary};
 use crate::encoding_util::{
-    BomKind, EncodedMap, MojibakeHint, UnmappablePolicy, build_encoded_map, encode_text,
+    BomKind, Charset, EncodedMap, MojibakeHint, UnmappablePolicy, build_encoded_map, encode_text,
     is_stateful, scan_mojibake, sniff_bom,
 };
 use crate::error::{AppError, ErrorKind, Result};
@@ -56,12 +56,12 @@ impl Detection {
 /// separately lets `info` say whether the encoding was a decision or a guess.
 #[derive(Debug, Clone, Copy)]
 pub struct ForcedEncoding {
-    pub encoding: &'static Encoding,
+    pub encoding: Charset,
     pub source: Detection,
 }
 
 impl ForcedEncoding {
-    pub fn flag(encoding: &'static Encoding) -> Self {
+    pub fn flag(encoding: Charset) -> Self {
         ForcedEncoding {
             encoding,
             source: Detection::Explicit,
@@ -92,7 +92,7 @@ pub struct Document {
     /// Whole original file, BOM included.
     pub raw: Vec<u8>,
     pub bom: Option<BomKind>,
-    pub encoding: &'static Encoding,
+    pub encoding: Charset,
     pub detection: Detection,
     /// Decoded content, BOM excluded.
     pub text: String,
@@ -176,23 +176,29 @@ impl Document {
                 source,
             }) => {
                 // Only strip a BOM that belongs to the forced encoding.
-                let bom = bom.filter(|b| b.encoding() == enc);
+                let bom = bom.filter(|b| b.charset() == enc);
                 (enc, source, bom)
             }
             None => match bom {
-                Some(b) => (b.encoding(), Detection::Bom, Some(b)),
+                Some(b) => (b.charset(), Detection::Bom, Some(b)),
                 None => {
                     let body = &raw[..];
                     if body.is_empty() {
-                        (UTF_8, Detection::Default, None)
+                        (Charset::new(UTF_8), Detection::Default, None)
                     } else if body.is_ascii() {
                         // Separated from the UTF-8 verdict below because it is a
                         // weaker one: those bytes are valid UTF-8, but they are
                         // equally valid windows-1252, KOI8-R and every other
                         // ASCII superset. Nothing was detected here.
-                        (UTF_8, Detection::Ascii, None)
+                        //
+                        // UTF-8 rather than `Charset::ASCII`, deliberately: the
+                        // file being ASCII so far is not a decision that it must
+                        // stay so, and refusing every accented character on that
+                        // basis would make most new files unwritable. Saying it
+                        // must stay ASCII is what `--encoding ascii` is for.
+                        (Charset::new(UTF_8), Detection::Ascii, None)
                     } else if std::str::from_utf8(body).is_ok() {
-                        (UTF_8, Detection::Utf8, None)
+                        (Charset::new(UTF_8), Detection::Utf8, None)
                     } else {
                         (
                             crate::encoding_util::detect_legacy(body),
@@ -208,10 +214,7 @@ impl Document {
         let content = &raw[content_start.min(raw.len())..];
         // The BOM (if any) was already split off above, so BOM handling must be
         // disabled here or a second BOM-looking sequence would be swallowed.
-        let (decoded, had_decode_errors) = {
-            let (cow, had_errors) = encoding.decode_without_bom_handling(content);
-            (cow.into_owned(), had_errors)
-        };
+        let (decoded, had_decode_errors) = encoding.decode_without_bom_handling(content);
 
         // Splicing needs a stable character→byte map, which stateful encoders
         // do not have.
@@ -229,7 +232,10 @@ impl Document {
         let line_index = LineIndex::build(&decoded);
 
         Document {
-            binary: sniff_binary(&raw, encoding),
+            // The sniff only distinguishes UTF-16 from everything else, which
+            // is a property of the encoding form, not of what a charset
+            // refuses.
+            binary: sniff_binary(&raw, encoding.encoding()),
             path,
             raw,
             bom,
@@ -353,8 +359,8 @@ impl Document {
         )
         .with_hint(format!(
             "pass --encoding LABEL to declare it — --encoding {} if that is what the file \
-             should be",
-            self.encoding.name().to_lowercase()
+             should be, or --encoding ascii to keep the file ASCII and refuse the character",
+            self.encoding.label()
         ))
     }
 
@@ -481,6 +487,24 @@ impl Document {
     }
 
     fn lossless_failure(&self) -> AppError {
+        // Declared ASCII is the one encoding whose "invalid bytes" have a
+        // single, obvious cause worth naming: the file simply is not ASCII.
+        // The generic hint below would send the reader looking for a wrong
+        // guess, and there was none — they said `ascii` themselves.
+        if self.encoding.is_ascii_only() && self.had_decode_errors {
+            return AppError::new(
+                ErrorKind::Encoding,
+                format!(
+                    "refusing to edit: {} has bytes above 0x7F, so it is not ASCII",
+                    self.path.display()
+                ),
+            )
+            .with_hint(
+                "name the encoding those bytes are really in (--encoding utf-8, \
+                 --encoding windows-1252, ...); `intact info FILE` without --encoding shows what \
+                 detection makes of them",
+            );
+        }
         let detail = if self.had_decode_errors {
             format!(
                 "{} contains byte sequences that are not valid {}",
@@ -522,11 +546,11 @@ impl Document {
 /// distinction it draws is UTF-16 against everything else, and a BOM-less
 /// UTF-16 file is not a case that arises — chardetng never guesses UTF-16, so
 /// full detection would reach the same branch this does.
-fn early_encoding(raw: &[u8], forced: Option<ForcedEncoding>) -> &'static Encoding {
+fn early_encoding(raw: &[u8], forced: Option<ForcedEncoding>) -> Charset {
     forced
         .map(|f| f.encoding)
-        .or_else(|| sniff_bom(raw).map(|b| b.encoding()))
-        .unwrap_or(UTF_8)
+        .or_else(|| sniff_bom(raw).map(|b| b.charset()))
+        .unwrap_or(Charset::new(UTF_8))
 }
 
 /// Refuse a file that does not look like text, before it is decoded.
@@ -546,7 +570,7 @@ fn gate_binary(
     if policy == BinaryPolicy::Allow {
         return Ok(());
     }
-    let Some(hint) = sniff_binary(raw, early_encoding(raw, forced)) else {
+    let Some(hint) = sniff_binary(raw, early_encoding(raw, forced).encoding()) else {
         return Ok(());
     };
     Err(AppError::new(
@@ -584,13 +608,17 @@ fn validate_edits(edits: &mut [Edit], text_len: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use encoding_rs::WINDOWS_1252;
+    use encoding_rs::{Encoding, WINDOWS_1252};
 
     fn doc_from(bytes: &[u8], enc: Option<&'static Encoding>) -> Document {
+        charset_doc(bytes, enc.map(Charset::new))
+    }
+
+    fn charset_doc(bytes: &[u8], cs: Option<Charset>) -> Document {
         Document::from_bytes(
             PathBuf::from("mem"),
             bytes.to_vec(),
-            enc.map(ForcedEncoding::flag),
+            cs.map(ForcedEncoding::flag),
             true,
         )
     }
@@ -678,6 +706,39 @@ mod tests {
             expected.extend_from_slice(&unit.to_le_bytes());
         }
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn declared_ascii_refuses_a_non_ascii_insert() {
+        let doc = charset_doc(b"abc\n", Some(Charset::ASCII));
+        assert_eq!(doc.encoding.name(), "US-ASCII");
+        assert!(doc.roundtrip);
+        let mut edits = vec![Edit::new(0, 3, "café")];
+        let err = doc
+            .build_output(&mut edits, UnmappablePolicy::Error, false)
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Encoding);
+        // ASCII-only edits still go through: the mandate is about what is
+        // added, not about refusing the file.
+        let mut edits = vec![Edit::new(0, 3, "xyz")];
+        let out = doc
+            .build_output(&mut edits, UnmappablePolicy::Error, false)
+            .unwrap();
+        assert_eq!(out, b"xyz\n".to_vec());
+    }
+
+    #[test]
+    fn declared_ascii_does_not_round_trip_a_non_ascii_file() {
+        // "café\n" in UTF-8: not ASCII, so under --encoding ascii the file
+        // itself is undecodable and every edit to it is refused.
+        let doc = charset_doc("café\n".as_bytes(), Some(Charset::ASCII));
+        assert!(doc.had_decode_errors);
+        assert!(!doc.roundtrip);
+        let mut edits = vec![Edit::new(0, 1, "x")];
+        let err = doc
+            .build_output(&mut edits, UnmappablePolicy::Error, false)
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Encoding);
     }
 
     #[test]
