@@ -27,6 +27,19 @@ impl Ctx {
         }
     }
 
+    /// Rewrite line terminators in text that is about to be searched for.
+    ///
+    /// A needle has to match the file as it stands, so it follows the file's
+    /// own dominant ending whatever `--eol` says inserted text should get —
+    /// `--eol lf` on a CRLF file must still find 'a\nb'. Only `keep` leaves it
+    /// exactly as typed.
+    pub fn shape_needle(&self, text: &str) -> String {
+        match self.eol_mode {
+            EolMode::Keep => text.to_string(),
+            _ => lines::normalize_eol(text, self.file_eol),
+        }
+    }
+
     pub fn eol(&self) -> &'static str {
         self.eol_mode
             .resolve(self.file_eol)
@@ -71,7 +84,7 @@ fn build_regex(pattern: &str, is_regex: bool, ignore_case: bool) -> Result<Regex
 
 /// Why a regex that spans lines found nothing in this file, when it did.
 ///
-/// A literal `--find` never hits this: [`Ctx::shape`] rewrites the terminators
+/// A literal `--find` never hits this: [`Ctx::shape_needle`] rewrites the terminators
 /// in it to the file's own before it is matched, so a needle typed with `\n`
 /// finds CRLF text anyway. A pattern cannot be shaped that way — there the same
 /// two characters are syntax, and rewriting them would change what the pattern
@@ -184,7 +197,8 @@ pub fn replace(
     if args.no_expand && !args.regex {
         return Err(AppError::new(
             ErrorKind::Usage,
-            "no_expand applies to a regex replacement, and regex is not set",
+            "no_expand only turns off $1 / ${name} capture expansion in a regex replacement, \
+             and regex is not set; a plain replacement expands nothing, backslashes included",
         ));
     }
     if args.expect == Some(0) {
@@ -197,7 +211,7 @@ pub fn replace(
     let needle = if args.regex {
         find.to_string()
     } else {
-        ctx.shape(find)
+        ctx.shape_needle(find)
     };
     let re = build_regex(&needle, args.regex, args.ignore_case)?;
     let replacement = ctx.shape(with);
@@ -302,35 +316,56 @@ pub fn insert(doc: &Document, args: &InsertArgs, text: &str, ctx: Ctx) -> Result
     let index = doc.lines();
     let total = index.count();
 
-    let (offset, at_line) = match (args.line, args.after) {
-        (Some(spec), None) => {
-            // One past the end is allowed: it means "append a new line".
-            let n = spec.resolve(total, total + 1)?;
-            let off = match index.get(n) {
-                Some(l) => l.start,
-                None => doc.text.len(),
-            };
-            (off, n)
-        }
-        (None, Some(spec)) => {
-            let n = spec.resolve(total, total)?;
-            let off = index.get(n).map(|l| l.end).ok_or_else(|| {
-                AppError::new(ErrorKind::Range, format!("line {n} does not exist"))
-            })?;
-            (off, n + 1)
-        }
-        (None, None) => {
-            return Err(AppError::new(
-                ErrorKind::Usage,
-                "insert requires --line N or --after N",
-            ));
-        }
-        (Some(_), Some(_)) => {
-            return Err(AppError::new(
-                ErrorKind::Usage,
-                "--line and --after are mutually exclusive",
-            ));
-        }
+    let given = [
+        args.line.is_some(),
+        args.after.is_some(),
+        args.before_match.is_some(),
+        args.after_match.is_some(),
+    ]
+    .iter()
+    .filter(|&&g| g)
+    .count();
+    if given != 1 {
+        return Err(AppError::new(
+            ErrorKind::Usage,
+            if given == 0 {
+                "insert requires --line N, --after N, --before-match TEXT or --after-match TEXT"
+            } else {
+                "--line, --after, --before-match and --after-match are mutually exclusive"
+            },
+        ));
+    }
+
+    // Each form comes down to "before line N" or "after line N".
+    let (before, n) = if let Some(spec) = args.line {
+        // One past the end is allowed: it means "append a new line".
+        (true, spec.resolve(total, total + 1)?)
+    } else if let Some(spec) = args.after {
+        (false, spec.resolve(total, total)?)
+    } else if let Some(anchor) = &args.before_match {
+        let (start, _) = unique_anchor(doc, anchor, ctx)?;
+        (true, index.line_of_offset(start))
+    } else if let Some(anchor) = &args.after_match {
+        // The line holding the anchor's last character, so an anchor that
+        // ends with its own terminator still means the line it is on.
+        let (_, end) = unique_anchor(doc, anchor, ctx)?;
+        (false, index.line_of_offset(end - 1))
+    } else {
+        unreachable!("exactly one insert position was checked above")
+    };
+
+    let (offset, at_line) = if before {
+        let off = match index.get(n) {
+            Some(l) => l.start,
+            None => doc.text.len(),
+        };
+        (off, n)
+    } else {
+        let off = index
+            .get(n)
+            .map(|l| l.end)
+            .ok_or_else(|| AppError::new(ErrorKind::Range, format!("line {n} does not exist")))?;
+        (off, n + 1)
     };
 
     let mut block = ctx.shape_block(text);
@@ -346,6 +381,45 @@ pub fn insert(doc: &Document, args: &InsertArgs, text: &str, ctx: Ctx) -> Result
         details: json!({ "at_line": at_line, "lines_inserted": inserted_lines }),
         edits: vec![Edit::new(offset, offset, block)],
     })
+}
+
+/// Byte range of the one place `anchor` occurs, as literal text.
+///
+/// The same rule as `replace` without `--all`: a missing anchor is exit 3 and a
+/// repeated one exit 4, rather than a guess at which line was meant.
+fn unique_anchor(doc: &Document, anchor: &str, ctx: Ctx) -> Result<(usize, usize)> {
+    if anchor.is_empty() {
+        return Err(AppError::new(
+            ErrorKind::Usage,
+            "the insert anchor must not be empty",
+        ));
+    }
+    let re = build_regex(&ctx.shape_needle(anchor), false, false)?;
+    let found: Vec<_> = re.find_iter(&doc.text).collect();
+    match found.as_slice() {
+        [] => Err(AppError::new(
+            ErrorKind::NoMatch,
+            format!(
+                "no match for {} in {}",
+                describe(anchor, false),
+                doc.path.display()
+            ),
+        )
+        .with_hint("use `intact search` to check the text")),
+        [m] => Ok((m.start(), m.end())),
+        [first, ..] => {
+            let (line, col) = position(doc, first.start());
+            Err(AppError::new(
+                ErrorKind::Ambiguous,
+                format!(
+                    "{} occurrences of {} (first at line {line}, column {col}); refusing to guess",
+                    found.len(),
+                    describe(anchor, false)
+                ),
+            )
+            .with_hint("extend the anchor until it is unique"))
+        }
+    }
 }
 
 pub fn append(doc: &Document, text: &str, ctx: Ctx, trailing_newline: bool) -> Result<OpOutcome> {

@@ -27,6 +27,9 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
         wsl,
     } = *spec;
     let mandated_encoding = encoding;
+    // A mandate for UTF-8 or ASCII leaves every file readable by tools that
+    // assume UTF-8; any other one is what makes them misread.
+    let legacy_mandate = mandated_encoding.filter(|l| *l != "UTF-8" && *l != "US-ASCII");
     let h = "#".repeat(heading_level.clamp(1, 4) as usize);
     let sub = format!("{h}#");
 
@@ -81,19 +84,31 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
              than leaving it with mixed endings. That is a pre-existing defect in the file, not \
              something your edit caused: normalise it in its own step with \
              `{cmd} convert FILE --newlines {style}`, and keep that separate from the change you \
-             were asked to make so the diff stays readable.\n",
+             were asked to make so the diff stays readable.\n\n\
+             Commands that only read (`info`, `view`, `search`) do not need these two flags.\n",
             upper = style.to_uppercase()
         ),
     };
 
     // A project that mandates one encoding must never fall back to detection:
     // a wrong single-byte guess writes wrong bytes rather than failing.
+    let legacy_reading = match legacy_mandate {
+        None => String::new(),
+        Some(label) => format!(
+            "\n**Other tools misread these files.** Most file-reading and search tools \
+             assume UTF-8: in a `{label}` file they show accented characters as garbage, and a \
+             search for text containing one finds nothing even when it is there. Read and \
+             search anything with non-ASCII characters through `{cmd} view` and \
+             `{cmd} search`.\n"
+        ),
+    };
     let mandate = match mandated_encoding {
         None => String::new(),
         Some(label) => format!(
             "\n{sub} Encoding: always `{label}`\n\n\
              Every file in this repository is `{label}`, and every file you create must be too. \
-             Never let `{cmd}` guess — pass both flags on **every** command:\n\n\
+             Never let `{cmd}` guess — pass both flags on **every** command, reads included, \
+             since `view` and `search` decode the file with it:\n\n\
              ```bash\n\
              {cmd} --encoding {label} --no-guess replace FILE --find TEXT --with TEXT\n\
              ```\n\n\
@@ -115,7 +130,7 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
              Text you pass is still UTF-8 — `{cmd}` transcodes it into `{label}` for you. If a \
              character you need cannot be represented in `{label}`, the command fails with exit \
              5; that is a real conflict with the project's encoding policy, so raise it rather \
-             than working around it with `--unmappable`.\n"
+             than working around it with `--unmappable`.\n{legacy_reading}"
         ),
     };
 
@@ -167,13 +182,20 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
         if let Some(label) = mandated_encoding {
             policy.push_str(&format!(
                 "\nEvery file here is `{label}`. Pass `--encoding {label} --no-guess` on every \
-                 command — including `create`.\n"
+                 command — including `create`, `view` and `search`.\n"
+            ));
+        }
+        if let Some(label) = legacy_mandate {
+            policy.push_str(&format!(
+                "\nTools that assume UTF-8 garble non-ASCII text in a `{label}` file, and their \
+                 searches for it come back empty: read and search such text with `{cmd} view` / \
+                 `{cmd} search`.\n"
             ));
         }
         if let Some(style) = eol {
             policy.push_str(&format!(
                 "\nEvery file here uses {} line endings. Pass `--eol {style} --strict-eol` on \
-                 every command. Fix a non-conforming file with \
+                 every command that writes. Fix a non-conforming file with \
                  `{cmd} convert FILE --newlines {style}`.\n",
                 style.to_uppercase()
             ));
@@ -184,6 +206,13 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
                  no config file, and each command you run may start a fresh shell, so there is \
                  nothing to set once.\n",
             );
+        }
+        if legacy_mandate.is_none() {
+            policy.push_str(&format!(
+                "\nOther tools read files as UTF-8. For non-ASCII text in a file that is not \
+                 UTF-8, read and search with `{cmd} view` / `{cmd} search`: elsewhere it comes \
+                 out garbled, and searches for it come back empty.\n"
+            ));
         }
         let encoding_line = policy;
         return format!(
@@ -197,6 +226,7 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
              {cmd} replace FILE --find TEXT --with TEXT          # anchor must be unique\n\
              {cmd} replace FILE --find TEXT --with TEXT --all\n\
              {cmd} insert FILE --line N --text TEXT\n\
+             {cmd} insert FILE --after-match TEXT --text TEXT    # or --before-match\n\
              {cmd} delete FILE --lines 10:20\n\
              {cmd} replace-lines FILE --lines 5:7 --text TEXT\n\
              {cmd} move-lines FILE --lines 40:52 --after 12      # relocate a block\n\
@@ -241,6 +271,7 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
          {cmd} replace FILE --find TEXT --with TEXT --all\n\
          {cmd} replace FILE --regex --find 'def (\\w+)\\(' --with 'def test_$1(' --all\n\
          {cmd} insert FILE --line N --text TEXT         # --after N to insert below\n\
+         {cmd} insert FILE --after-match TEXT --text TEXT  # or --before-match: no line number\n\
          {cmd} append FILE --text TEXT\n\
          {cmd} prepend FILE --text TEXT\n\
          {cmd} delete FILE --lines 10:20\n\
@@ -253,7 +284,9 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
          ```\n\n\
          Text can come from `--text` or `--text-file PATH` (for `replace`: `--with`, \
          `--with-file`, or `--delete` to remove the match). `--text-file -` reads standard \
-         input, as does any other path argument given `-`. Add `--escapes` to write `\\n` inside \
+         input, as does any other path argument given `-`. For a block of code, feed it from a \
+         heredoc with a quoted delimiter (`--text-file - <<'EOF'`): the text arrives exactly as \
+         written, quotes and backslashes included. Add `--escapes` to write `\\n` inside \
          a single `--text` argument. Line ranges are 1-based and inclusive: `7`, `5:9`, `5:`, \
          `:9`, `$`, `3:$`, `-3:-1`.\n\n\
          {sub} More than one edit: use `batch`\n\n\
@@ -270,15 +303,23 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
          EOF\n\
          ```\n\n\
          Ops: `replace` (find, with, regex, ignore_case, all, occurrence, expect, lines, \
-         no_expand), `insert` (line or after, text), `append`, `prepend` (text), `delete` \
-         (lines), `replace-lines` (lines, text), `move-lines` (lines, and one of after, before, \
-         by), `write` (text) — plus `file` on any of them. \
-         Run `{cmd} guide batch` for the full schema.\n\n\
+         no_expand), `insert` (one of line, after, before_match, after_match; text), `append`, \
+         `prepend` (text), `delete` (lines), `replace-lines` (lines, text), `move-lines` (lines, \
+         and one of after, before, by), `write` (text), `create` (text, parents) — plus `file` \
+         on any of them. Script text is decoded as JSON and nothing else: `\"\\\\n\"` is a \
+         backslash and an `n` in the file. Run `{cmd} guide batch` for the full schema.\n\n\
          {sub} How to make an edit\n\n\
-         1. Read the region you are about to change: `{cmd} view FILE --lines A:B --number`.\n\
+         1. Read the region you are about to change. Your usual tools for reading and \
+         searching files are fine in a UTF-8 file, and for ASCII text in any file. In a file \
+         that is not UTF-8, assume they decode it as UTF-8 anyway: non-ASCII characters come \
+         out garbled, and a search for text containing them can find nothing although it is \
+         there. For those lines and those searches use `{cmd} view FILE --lines A:B --number` \
+         and `{cmd} search FILE --find TEXT`, which decode the file in its own encoding — and \
+         never take an empty search for non-ASCII text in such a file as proof it is absent.\n\
          2. Choose an anchor that occurs exactly once in the file, and include enough \
          surrounding text to make it unique. `{cmd} search FILE --find TEXT` reports how many \
-         times it occurs.\n\
+         times it occurs. An anchor with non-ASCII characters in it should come from \
+         `{cmd} view` output, not from another tool's.\n\
          3. Apply the edit — a single `replace` for one change, `{cmd} batch` for several or for \
          more than one file.\n\n\
          {sub} Rules\n\n\

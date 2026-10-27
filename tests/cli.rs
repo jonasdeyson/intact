@@ -2034,9 +2034,26 @@ fn strict_eol_refuses_to_create_mixed_endings() {
     ]);
     assert_eq!(code(&out), 5);
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("not CRLF"), "{err}");
+    // A consistently-LF file is not mixed, and the message says what it is.
+    assert!(err.contains("uses LF line endings throughout (2)"), "{err}");
+    assert!(err.contains("requires CRLF"), "{err}");
     assert!(err.contains("--newlines crlf"), "hint missing: {err}");
     assert_eq!(read(&f), b"one\ntwo\n".to_vec());
+
+    // A mixed one is counted instead.
+    let m = sb.file("mixed-append.txt", b"a\r\nb\n");
+    let out = run(&[
+        "--eol",
+        "crlf",
+        "--strict-eol",
+        "append",
+        m.to_str().unwrap(),
+        "--text",
+        "c",
+    ]);
+    assert_eq!(code(&out), 5);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("1 line ending(s) that are not CRLF"), "{err}");
 
     // The suggested remedy needs no --to, and then the edit succeeds.
     assert_eq!(code(&run(&["convert", p, "--newlines", "crlf"])), 0);
@@ -2655,4 +2672,297 @@ fn ordinary_accented_text_is_not_flagged_as_mojibake() {
         let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
         assert!(v.get("mojibake").is_none(), "{name} was flagged: {v}");
     }
+}
+
+fn run_stdin(args: &[&str], input: &str) -> Output {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(EXE)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// Script text is JSON-decoded once and nothing else: `\\n` in JSON is a
+/// backslash and an `n` in the file, never a line break.
+#[test]
+fn batch_text_is_decoded_by_json_only() {
+    let sb = Sandbox::new("batch-backslash");
+    let f = sb.file("a.cpp", b"a\r\nb\r\n");
+    let script = r#"[{"op":"replace","find":"a\nb","with":"s += w + \"\\n\";\ny"}]"#;
+    let out = run_stdin(
+        &[
+            "--encoding",
+            "windows-1252",
+            "--no-guess",
+            "--eol",
+            "crlf",
+            "--strict-eol",
+            "batch",
+            f.to_str().unwrap(),
+            "--script",
+            "-",
+        ],
+        script,
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&f), b"s += w + \"\\n\";\r\ny\r\n".to_vec());
+}
+
+#[test]
+fn no_expand_refusal_says_what_it_controls() {
+    let sb = Sandbox::new("noexpand");
+    let f = sb.file("a.txt", b"x\n");
+    let out = run_stdin(
+        &["batch", f.to_str().unwrap(), "--script", "-"],
+        r#"[{"op":"replace","find":"x","with":"y","no_expand":true}]"#,
+    );
+    assert_eq!(code(&out), 2);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("$1 / ${name}"), "{err}");
+    assert!(err.contains("expands nothing"), "{err}");
+    assert_eq!(read(&f), b"x\n".to_vec());
+}
+
+/// A heredoc ends its last line, so `--with-file -` carries a terminator the
+/// inline `--find` lacks. Keeping it would leave a blank line under the anchor.
+#[test]
+fn replace_drops_the_file_side_trailing_newline_when_the_other_side_has_none() {
+    let sb = Sandbox::new("replace-trim");
+    let f = sb.file("a.lua", b"local x = 1\r\nfunction T:B (G)\r\nend\r\n");
+    let p = f.to_str().unwrap();
+
+    let out = run_stdin(
+        &[
+            "replace",
+            p,
+            "--find",
+            "function T:B (G)",
+            "--with-file",
+            "-",
+        ],
+        "function T:A (G)\nend\n\nfunction T:B (G)\n",
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        read(&f),
+        b"local x = 1\r\nfunction T:A (G)\r\nend\r\n\r\nfunction T:B (G)\r\nend\r\n".to_vec()
+    );
+
+    // Both sides ending in a terminator is an exact multi-line replace; nothing
+    // is trimmed.
+    let g = sb.file("b.txt", b"a\nb\nc\n");
+    let out = run_stdin(
+        &[
+            "--escapes",
+            "replace",
+            g.to_str().unwrap(),
+            "--find",
+            "a\\n",
+            "--with-file",
+            "-",
+        ],
+        "x\ny\n",
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&g), b"x\ny\nb\nc\n".to_vec());
+
+    // The mirror case: the anchor comes from a file, the replacement inline.
+    let h = sb.file("c.txt", b"one two\nthree\n");
+    let out = run_stdin(
+        &[
+            "replace",
+            h.to_str().unwrap(),
+            "--find-file",
+            "-",
+            "--with",
+            "1 2",
+        ],
+        "one two\n",
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&h), b"1 2\nthree\n".to_vec());
+}
+
+#[test]
+fn insert_relative_to_a_unique_anchor() {
+    let sb = Sandbox::new("insert-match");
+    let f = sb.file(
+        "a.py",
+        b"import os\r\nimport sys\r\n\r\ndef main():\r\n    pass\r\n",
+    );
+    let p = f.to_str().unwrap();
+
+    let out = run(&[
+        "insert",
+        p,
+        "--after-match",
+        "import sys",
+        "--text",
+        "import re",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let out = run(&[
+        "insert",
+        p,
+        "--before-match",
+        "def main",
+        "--text",
+        "# entry",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        read(&f),
+        b"import os\r\nimport sys\r\nimport re\r\n\r\n# entry\r\ndef main():\r\n    pass\r\n"
+            .to_vec()
+    );
+
+    // A multi-line anchor: after the line it ends on, terminator included or not.
+    let out = run(&[
+        "--escapes",
+        "insert",
+        p,
+        "--after-match",
+        "def main():\\n    pass\\n",
+        "--text",
+        "main()",
+    ]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(read(&f).ends_with(b"    pass\r\nmain()\r\n"));
+
+    // Missing is exit 3, ambiguous is exit 4, and neither writes.
+    let before = read(&f);
+    assert_eq!(
+        code(&run(&[
+            "insert",
+            p,
+            "--after-match",
+            "nowhere",
+            "--text",
+            "x"
+        ])),
+        3
+    );
+    assert_eq!(
+        code(&run(&[
+            "insert",
+            p,
+            "--after-match",
+            "import",
+            "--text",
+            "x"
+        ])),
+        4
+    );
+    assert_eq!(read(&f), before);
+
+    // One position only.
+    assert_eq!(
+        code(&run(&[
+            "insert",
+            p,
+            "--line",
+            "1",
+            "--after-match",
+            "os",
+            "--text",
+            "x"
+        ])),
+        2
+    );
+
+    // The same in a batch script.
+    let g = sb.file("b.txt", b"alpha\nbeta\n");
+    let out = run_stdin(
+        &["batch", g.to_str().unwrap(), "--script", "-"],
+        r#"[{"op":"insert","after_match":"alpha","text":"one"},
+            {"op":"insert","before_match":"alpha","text":"zero"}]"#,
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&g), b"zero\nalpha\none\nbeta\n".to_vec());
+}
+
+#[test]
+fn batch_creates_files_atomically() {
+    let sb = Sandbox::new("batch-create");
+    let a = sb.dir.join("a.txt");
+    let b = sb.dir.join("sub/dir/b.txt");
+    let script = format!(
+        r#"[{{"op":"create","file":{a:?},"text":"caf\u00e9"}},
+            {{"op":"append","file":{a:?},"text":"fin"}},
+            {{"op":"create","file":{b:?},"text":"b","parents":true}}]"#,
+        a = a.to_str().unwrap(),
+        b = b.to_str().unwrap(),
+    );
+    let out = run_stdin(
+        &[
+            "--encoding",
+            "windows-1252",
+            "--eol",
+            "crlf",
+            "batch",
+            "--script",
+            "-",
+        ],
+        &script,
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(read(&a), b"caf\xE9\r\nfin\r\n".to_vec());
+    assert_eq!(read(&b), b"b\r\n".to_vec());
+
+    // An existing file is exit 7, and nothing else in the script is written.
+    let c = sb.dir.join("c.txt");
+    let script = format!(
+        r#"[{{"op":"create","file":{c:?},"text":"c"}},
+            {{"op":"create","file":{a:?},"text":"again"}}]"#,
+        a = a.to_str().unwrap(),
+        c = c.to_str().unwrap(),
+    );
+    assert_eq!(code(&run_stdin(&["batch", "--script", "-"], &script)), 7);
+    assert!(!c.exists());
+
+    // A later failure leaves no file and no directory behind.
+    let d = sb.dir.join("new/d.txt");
+    let script = format!(
+        r#"[{{"op":"create","file":{d:?},"text":"d","parents":true}},
+            {{"op":"replace","file":{a:?},"find":"nowhere","with":"x"}}]"#,
+        a = a.to_str().unwrap(),
+        d = d.to_str().unwrap(),
+    );
+    assert_eq!(code(&run_stdin(&["batch", "--script", "-"], &script)), 3);
+    assert!(!sb.dir.join("new").exists());
+
+    // Without parents, a missing directory is exit 8.
+    let script = format!(
+        r#"[{{"op":"create","file":{d:?},"text":"d"}}]"#,
+        d = d.to_str().unwrap(),
+    );
+    assert_eq!(code(&run_stdin(&["batch", "--script", "-"], &script)), 8);
+    assert!(!sb.dir.join("new").exists());
+}
+
+/// A needle has to match the file as it stands, so its terminators follow the
+/// file's, whatever --eol says new text should get.
+#[test]
+fn a_literal_find_follows_the_file_endings_under_any_eol() {
+    let sb = Sandbox::new("needle-eol");
+    let f = sb.file("a.txt", b"a\r\nb\r\n");
+    let p = f.to_str().unwrap();
+    for (eol, find) in [("lf", "a\\nb"), ("crlf", "a\\r\\nb"), ("auto", "a\\nb")] {
+        let out = run(&["--eol", eol, "--escapes", "search", p, "--find", find]);
+        assert_eq!(code(&out), 0, "--eol {eol} --find {find}");
+    }
+    // `keep` takes the needle exactly as typed.
+    let out = run(&["--eol", "keep", "--escapes", "search", p, "--find", "a\\nb"]);
+    assert_eq!(code(&out), 3);
 }

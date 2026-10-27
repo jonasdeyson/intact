@@ -368,7 +368,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs, forced: Option<ForcedEncoding>)
     let needle = if args.regex {
         pattern.clone()
     } else {
-        ctx.shape(&pattern)
+        ctx.shape_needle(&pattern)
     };
 
     let (value, count) = ops::search(&doc, args, &needle)?;
@@ -452,13 +452,13 @@ fn cmd_edit(cli: &Cli, forced: Option<ForcedEncoding>) -> Result<i32> {
                 )
                 .with_hint("pass one of them inline as --find/--with, or from a file"));
             }
-            let find = textsrc::resolve_pair(
+            let mut find = textsrc::resolve_pair(
                 &a.find,
                 &a.find_file,
                 "--find (or --find-file) is required",
                 cli.escapes,
             )?;
-            let with = if a.delete {
+            let mut with = if a.delete {
                 String::new()
             } else {
                 textsrc::resolve_pair(
@@ -468,11 +468,44 @@ fn cmd_edit(cli: &Cli, forced: Option<ForcedEncoding>) -> Result<i32> {
                     cli.escapes,
                 )?
             };
+            // A heredoc or file always ends its last line. When only the side
+            // read from one ends in a terminator, that terminator belongs to
+            // the file rather than the text: keeping it would add or swallow a
+            // line break next to the anchor (`--find 'f()' --with-file -` with
+            // "f()\n" on stdin would leave a blank line under it).
+            if !a.delete && a.find_file.is_some() != a.with_file.is_some() {
+                let side = if a.find_file.is_some() {
+                    (&mut find, &with)
+                } else {
+                    (&mut with, &find)
+                };
+                if lines::ends_with_eol(side.0) && !lines::ends_with_eol(side.1) {
+                    textsrc::trim_one_eol(side.0);
+                }
+            }
             ops::replace(&doc, a, &find, &with, ctx)?
         }
         Command::Insert(a) => {
             let text = textsrc::resolve(&a.text, "insert", cli.escapes)?;
-            ops::insert(&doc, a, &text, ctx)?
+            // --escapes covers an anchor as it covers --find.
+            let anchor = |m: &Option<String>| -> Result<Option<String>> {
+                match m {
+                    Some(s) if cli.escapes => Ok(Some(textsrc::unescape(s)?)),
+                    other => Ok(other.clone()),
+                }
+            };
+            let args = cli::InsertArgs {
+                file: a.file.clone(),
+                line: a.line,
+                after: a.after,
+                before_match: anchor(&a.before_match)?,
+                after_match: anchor(&a.after_match)?,
+                text: cli::TextSource {
+                    text: None,
+                    text_file: None,
+                },
+            };
+            ops::insert(&doc, &args, &text, ctx)?
         }
         Command::Append(a) => {
             let text = textsrc::resolve(&a.text, "append", cli.escapes)?;

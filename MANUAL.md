@@ -501,6 +501,31 @@ replace uses a matching pair for each half:
 Any path argument that reads text accepts `-` for standard input, including
 `batch --script -`. There is no separate `--text-stdin` flag.
 
+### Multi-line text
+
+The dependable way to pass a block of text is standard input from a heredoc
+with a QUOTED delimiter. The shell then passes every character through as
+typed - quotes, `$`, backslashes - and so does intact:
+
+```bash
+intact insert app.c --after-match 'int main(void) {' --text-file - <<'EOF'
+    const char *sep = "\n";
+    printf("%s", sep);
+EOF
+```
+
+With an unquoted `<<EOF` the shell expands `$name` and collapses `\\` to `\`,
+so the text that arrives is not the text you wrote. Only one argument per
+command can read standard input; for several blocks, use a `batch` script.
+
+A heredoc or file always ends its last line. For `insert`, `append` and the
+other line-based commands that changes nothing. For `replace`, when exactly one
+side comes from a file (`--find-file` or `--with-file`) and only that side ends
+in a line terminator, that one terminator is dropped as belonging to the file
+rather than the text. So `--find 'f()' --with-file -` fed "f()\ng()\n"
+does not leave a blank line under `g()`. When both sides end in a terminator,
+or both come from files, nothing is trimmed.
+
 ### Escapes
 
 `--escapes` interprets backslash sequences in `--text`, `--find` and `--with`.
@@ -531,8 +556,11 @@ which is what you want when editing code containing regex or Windows paths.
 | lf, crlf, cr | force one |
 | keep | insert the text exactly as given |
 
-Under auto, a literal (non-regex) `--find` is also rewritten, so searching for
-'a\nb' works on a CRLF file.
+Text you search for is a different matter: it has to match the file as it
+stands. So a literal (non-regex) `--find` - in `search`, `replace`, an `insert`
+anchor or a `batch` op - has its terminators rewritten to the file's own
+dominant ending under every `--eol` except keep. 'a\nb' and 'a\r\nb' both
+find the same two lines in a CRLF file, and in an LF one.
 
 A `--regex` pattern is not rewritten — there the same characters are syntax,
 and changing them would change what the pattern means. So a regex spanning
@@ -555,13 +583,21 @@ than LF.
 
 `--strict-eol` makes any write to a file whose existing terminators are not
 the mandated ones fail with exit 5, instead of appending CRLF text to an LF
-file and leaving it mixed. It reports the counts it found:
+file and leaving it mixed. A file that consistently uses another style is not
+the same thing as a mixed one, and the message says which it is:
 
 ```text
-refusing to write: app.c has 2 line ending(s) that are not CRLF
-(lf=2, crlf=0, cr=0)
-hint: normalise it first: `intact convert app.c --newlines crlf`
+refusing to write: app.c uses LF line endings throughout (622), but --eol crlf
+--strict-eol requires CRLF
+hint: converting it is a change of its own, separate from your edit: ...
+
+refusing to write: lib.c has 2 line ending(s) that are not CRLF (lf=2, crlf=40, cr=0)
+hint: normalise it first: `intact convert lib.c --newlines crlf`
 ```
+
+Converting a consistent file rewrites every line ending in it, which is a
+decision about that file rather than part of the edit at hand. Without
+`--strict-eol` (and with `--eol auto`) an edit follows the file instead.
 
 The guard needs something to enforce, so `--eol` must be lf, crlf or cr; with
 auto or keep it is a usage error rather than a silent no-op. write, create and
@@ -767,20 +803,33 @@ A bare JSON array works too. Fields per op:
 | Op | Fields |
 | --- | --- |
 | replace | find, with, regex, ignore_case, all, occurrence, expect, lines, no_expand |
-| insert | line or after, text |
+| insert | one of line, after, before_match or after_match; text |
 | append | text |
 | prepend | text |
 | delete | lines |
 | replace-lines | lines, text |
 | move-lines | lines, and one of after, before or by |
 | write | text |
+| create | text, parents (the file must not exist yet) |
 
 Every op also accepts "file". "lines", "line", "after" and "before" accept a
 number or any range string from the ranges topic. Unknown fields are rejected, so a typo fails
 loudly instead of being ignored.
 
-Text in a script is UTF-8 JSON, with normal JSON escapes — use \n for newlines
-rather than the `--escapes` flag.
+Text in a script is UTF-8 JSON, decoded once by the JSON parser and by nothing
+else - `--escapes` never touches it. Use \n for a line break; "\\n" is a
+backslash and an n in the file, which is what a C string literal needs. If a
+real line break turns up where you wrote "\\n", a backslash was lost before
+intact read the script: an unquoted heredoc (<<EOF rather than <<'EOF'),
+`echo`, or any wrapper that passes the command along as an escaped string.
+`--script FILE` with the script in a file sidesteps all of them.
+
+"find", "before_match" and "after_match" follow the file's line endings, as on
+the command line: a \n in them matches a CRLF line end too.
+
+A "create" op makes a new file, so several files can be created - and edited
+by the ops after it - in one all-or-nothing command. With "parents": true a
+missing directory is made, but only once every op has succeeded.
 
 ### Several files in one command
 
@@ -863,16 +912,19 @@ intact insert app.py --line 1 --text 'import os'
 
 ### Insert relative to an anchor, without knowing a line number
 
-Rewrite the anchor as itself plus the new line, rather than looking the line
-number up first:
-
 ```bash
-intact replace app.py --escapes \
-    --find 'import b' --with 'import b\nimport c'
+intact insert app.py --after-match 'import b' --text 'import c'
+intact insert app.py --before-match 'def main(' --text-file - <<'EOF'
+def helper():
+    return 1
+
+EOF
 ```
 
-The same trick inserts before an anchor ('...\nimport b'), and it keeps the
-edit anchored to content rather than to a position that may have moved.
+The anchor must occur exactly once (exit 3 if missing, 4 if ambiguous); the
+text goes in as whole lines before the line where the anchor starts, or after
+the line where it ends. It keeps the edit anchored to content rather than to a
+line number that may have moved since you looked.
 
 ### Create a file in a directory that does not exist yet
 
@@ -883,6 +935,19 @@ intact create src/components/Foo.tsx --parents --text 'export const Foo = () => 
 Without `--parents` a missing directory is an error (exit 8) rather than a
 silently created tree. `create` refuses an existing file (exit 7); use `write`
 when replacing the contents is what you meant.
+
+### Create several files at once
+
+```bash
+intact batch --script - <<'EOF'
+[{"op":"create","file":"src/foo.h","text":"#pragma once\nint foo(void);"},
+ {"op":"create","file":"src/foo.c","text":"#include \"foo.h\"\nint foo(void) { return 1; }"},
+ {"op":"append","file":"src/Makefile.inc","text":"SRC += foo.c"}]
+EOF
+```
+
+Nothing is created unless every op succeeds, so a mistake in the last one does
+not leave the first files behind.
 
 ### Several changes to one file
 
@@ -926,7 +991,19 @@ for f in src/*.py; do intact replace "$f" --find old --with new --all; done
 intact replace-lines app.py --lines 20:35 --text-file /tmp/new_block.py
 ```
 
-### Insert multi-line text in one argument
+### Insert multi-line text
+
+A quoted heredoc on standard input takes the text exactly as written, which is
+what code full of quotes and backslashes needs:
+
+```bash
+intact insert app.py --line 1 --text-file - <<'EOF'
+import os
+import sys
+EOF
+```
+
+For a couple of short lines, `--escapes` fits it in one argument:
 
 ```bash
 intact insert app.py --line 1 --escapes --text 'import os\nimport sys'
