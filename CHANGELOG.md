@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A missing directory is made only once every op has succeeded.
 - The manual and `intact instructions` recommend a quoted heredoc on standard
   input (`--text-file - <<'EOF'`) for multi-line text, and the batch topic
-  states that script text is decoded by JSON once and by nothing else.
+  states that script text is decoded by JSON once and by nothing else. Both
+  also say what to do when something above the shell (an agent harness, say)
+  halves backslashes before a heredoc is read: check `--show-diff`, and pass
+  the text in a file that no shell command wrote.
 - `intact instructions` now says when other tools are safe for reading: fine for
   UTF-8 files and ASCII text, but tools that assume UTF-8 garble non-ASCII text
   in a legacy-encoded file and come back empty when searching for it, so that

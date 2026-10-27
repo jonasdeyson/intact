@@ -518,6 +518,13 @@ With an unquoted `<<EOF` the shell expands `$name` and collapses `\\` to `\`,
 so the text that arrives is not the text you wrote. Only one argument per
 command can read standard input; for several blocks, use a `batch` script.
 
+A quoted heredoc is literal from the shell onwards, but whatever hands your
+command to the shell can still consume backslashes before it gets there - some
+agent harnesses turn `\\` into `\` even inside <<'EOF'. intact cannot see that
+happen; `--show-diff` shows its result. If backslashes come out halved, put the
+block in a file written by something other than a shell command, and pass
+`--text-file PATH`, `--with-file PATH` or `--script PATH`.
+
 A heredoc or file always ends its last line. For `insert`, `append` and the
 other line-based commands that changes nothing. For `replace`, when exactly one
 side comes from a file (`--find-file` or `--with-file`) and only that side ends
@@ -822,7 +829,8 @@ backslash and an n in the file, which is what a C string literal needs. If a
 real line break turns up where you wrote "\\n", a backslash was lost before
 intact read the script: an unquoted heredoc (<<EOF rather than <<'EOF'),
 `echo`, or any wrapper that passes the command along as an escaped string.
-`--script FILE` with the script in a file sidesteps all of them.
+`--script FILE` sidesteps all of them, as long as the file was not itself
+written through a shell command.
 
 "find", "before_match" and "after_match" follow the file's line endings, as on
 the command line: a \n in them matches a CRLF line end too.

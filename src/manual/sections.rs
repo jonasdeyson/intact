@@ -579,6 +579,14 @@ EOF"#,
                  command can read standard input; for several blocks, use a `batch` script.",
             ),
             Block::Prose(
+                "A quoted heredoc is literal from the shell onwards, but whatever hands your\n\
+                 command to the shell can still consume backslashes before it gets there - some\n\
+                 agent harnesses turn `\\\\` into `\\` even inside <<'EOF'. intact cannot see that\n\
+                 happen; `--show-diff` shows its result. If backslashes come out halved, put the\n\
+                 block in a file written by something other than a shell command, and pass\n\
+                 `--text-file PATH`, `--with-file PATH` or `--script PATH`.",
+            ),
+            Block::Prose(
                 "A heredoc or file always ends its last line. For `insert`, `append` and the\n\
                  other line-based commands that changes nothing. For `replace`, when exactly one\n\
                  side comes from a file (`--find-file` or `--with-file`) and only that side ends\n\
@@ -929,7 +937,8 @@ intact batch --script ops.json      # every op names its own file"#,
                  real line break turns up where you wrote \"\\\\n\", a backslash was lost before\n\
                  intact read the script: an unquoted heredoc (<<EOF rather than <<'EOF'),\n\
                  `echo`, or any wrapper that passes the command along as an escaped string.\n\
-                 `--script FILE` with the script in a file sidesteps all of them.",
+                 `--script FILE` sidesteps all of them, as long as the file was not itself\n\
+                 written through a shell command.",
             ),
             Block::Prose(
                 "\"find\", \"before_match\" and \"after_match\" follow the file's line endings, as on\n\

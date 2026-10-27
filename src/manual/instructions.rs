@@ -285,8 +285,12 @@ pub fn instructions(spec: &InstructionsSpec<'_>) -> String {
          Text can come from `--text` or `--text-file PATH` (for `replace`: `--with`, \
          `--with-file`, or `--delete` to remove the match). `--text-file -` reads standard \
          input, as does any other path argument given `-`. For a block of code, feed it from a \
-         heredoc with a quoted delimiter (`--text-file - <<'EOF'`): the text arrives exactly as \
-         written, quotes and backslashes included. Add `--escapes` to write `\\n` inside \
+         heredoc with a quoted delimiter (`--text-file - <<'EOF'`): the shell passes it through \
+         as written, quotes and backslashes included. Still check backslashes in the \
+         `--show-diff` output: if they come out halved, whatever runs your commands is consuming \
+         them before the shell sees them. Then write the block to a scratch file outside this \
+         repository (any tool may write there) and pass `--text-file PATH`, or `--script PATH` \
+         for `batch`. Add `--escapes` to write `\\n` inside \
          a single `--text` argument. Line ranges are 1-based and inclusive: `7`, `5:9`, `5:`, \
          `:9`, `$`, `3:$`, `-3:-1`.\n\n\
          {sub} More than one edit: use `batch`\n\n\
