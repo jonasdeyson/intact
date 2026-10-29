@@ -33,6 +33,13 @@ rewrite() {
     mv "$file.new" "$file"
 }
 
+# Merges branch $1 into the current one and stops short of committing. Git's
+# chatter is shown only if the merge fails.
+merge() {
+    local out
+    out=$(git merge --no-ff --no-commit "$1" 2>&1) || { echo "$out" >&2; return 1; }
+}
+
 set_version() {
     rewrite Cargo.toml -v v="$1" '!done && /^version = "/ { $0 = "version = \"" v "\""; done = 1 } 1'
     cargo update --quiet --offline --workspace
@@ -119,21 +126,47 @@ confirm "Create the release and post-release commits?" || exit 1
 
 # --- Commits ------------------------------------------------------------------
 
-# From here on, anything but a completed push leaves local commits to undo.
+# From here on, anything but a completed push leaves local changes behind:
+# offer to undo them, or say how.
+dev_start=$(git rev-parse --short dev)
+master_start=$(git rev-parse --short master)
+print_only=0
+step() { if ((print_only)); then echo "  $*"; else "$@"; fi; }
+
+# Puts dev, master and the tags back as they were, doing only what is needed.
 undo() {
-    cat >&2 <<EOF
-
-To undo what this script did locally:
-  git checkout --force dev
-  git reset --hard origin/dev
-  git branch --force master origin/master
-  git tag --delete v$version
-EOF
+    local on_dev=0 dirty=0
+    if [[ $(git symbolic-ref --short --quiet HEAD) == dev ]]; then
+        on_dev=1
+        if [[ -n $(git status --porcelain) ]] || git rev-parse --quiet --verify MERGE_HEAD >/dev/null; then
+            dirty=1
+        fi
+    fi
+    # Leaving master also discards a merge or edits left unfinished there.
+    ((on_dev)) || step git checkout --force dev
+    if ((dirty)) || [[ $(git rev-parse --short dev) != "$dev_start" ]]; then
+        step git reset --hard "$dev_start"
+    fi
+    [[ $(git rev-parse --short master) == "$master_start" ]] || step git branch --force master "$master_start"
+    ! git rev-parse --quiet --verify "refs/tags/v$version" >/dev/null || step git tag --delete "v$version"
 }
-trap 'if (($? != 0)); then undo; fi' EXIT
 
+on_exit() {
+    (($1 == 0)) && return
+    echo >&2
+    if confirm "Undo the changes this script made locally?"; then
+        undo
+        echo "Undone: dev, master and the tags are as they were." >&2
+    else
+        echo "Left as they are. To undo them later:" >&2
+        print_only=1 undo >&2
+    fi
+}
+trap 'on_exit $?' EXIT
+
+# Neither merge can conflict: master is an ancestor of dev, checked above.
 git checkout --quiet master
-git merge --quiet --no-ff --no-commit dev
+merge dev
 set_version "$version"
 rewrite CHANGELOG.md \
     -v heading="## [$version] - $today" \
@@ -141,7 +174,7 @@ rewrite CHANGELOG.md \
     -v new="[$version]: $repo/compare/$prev_tag...v$version" \
     '$0 == "## [Unreleased]" { $0 = heading } $0 == old { $0 = new } 1'
 if ((edit)); then
-    "${VISUAL:-${EDITOR:-vi}}" CHANGELOG.md
+    "${VISUAL:-${EDITOR:-vi}}" CHANGELOG.md || die "the editor exited with an error, so the release stops here"
 fi
 grep -q "^## \[$version\]" CHANGELOG.md || die "CHANGELOG.md lost its '## [$version]' heading"
 git add Cargo.toml Cargo.lock CHANGELOG.md
@@ -149,7 +182,7 @@ git commit --quiet -m "Release $version."
 git tag -a "v$version" -m "Release $version."
 
 git checkout --quiet dev
-git merge --quiet --no-ff --no-commit master
+merge master
 set_version "$next-dev"
 rewrite CHANGELOG.md \
     -v heading="## [$version]" \
