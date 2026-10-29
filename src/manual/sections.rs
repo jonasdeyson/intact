@@ -560,6 +560,41 @@ intact convert FILE --to ascii --unmappable xml # &#233; for anything not ASCII"
                 "Any path argument that reads text accepts `-` for standard input, including\n\
                  `batch --script -`. There is no separate `--text-stdin` flag.",
             ),
+            Block::Heading("MULTI-LINE TEXT"),
+            Block::Prose(
+                "The dependable way to pass a block of text is standard input from a heredoc\n\
+                 with a QUOTED delimiter. The shell then passes every character through as\n\
+                 typed - quotes, `$`, backslashes - and so does intact:",
+            ),
+            Block::Code {
+                lang: "bash",
+                text: r#"intact insert app.c --after-match 'int main(void) {' --text-file - <<'EOF'
+    const char *sep = "\n";
+    printf("%s", sep);
+EOF"#,
+            },
+            Block::Prose(
+                "With an unquoted `<<EOF` the shell expands `$name` and collapses `\\\\` to `\\`,\n\
+                 so the text that arrives is not the text you wrote. Only one argument per\n\
+                 command can read standard input; for several blocks, use a `batch` script.",
+            ),
+            Block::Prose(
+                "A quoted heredoc is literal from the shell onwards, but whatever hands your\n\
+                 command to the shell can still consume backslashes before it gets there - some\n\
+                 agent harnesses turn `\\\\` into `\\` even inside <<'EOF'. intact cannot see that\n\
+                 happen; `--show-diff` shows its result. If backslashes come out halved, put the\n\
+                 block in a file written by something other than a shell command, and pass\n\
+                 `--text-file PATH`, `--with-file PATH` or `--script PATH`.",
+            ),
+            Block::Prose(
+                "A heredoc or file always ends its last line. For `insert`, `append` and the\n\
+                 other line-based commands that changes nothing. For `replace`, when exactly one\n\
+                 side comes from a file (`--find-file` or `--with-file`) and only that side ends\n\
+                 in a line terminator, that one terminator is dropped as belonging to the file\n\
+                 rather than the text. So `--find 'f()' --with-file -` fed \"f()\\ng()\\n\"\n\
+                 does not leave a blank line under `g()`. When both sides end in a terminator,\n\
+                 or both come from files, nothing is trimmed.",
+            ),
             Block::Heading("ESCAPES"),
             Block::Prose(
                 "`--escapes` interprets backslash sequences in `--text`, `--find` and `--with`.\n\
@@ -596,8 +631,11 @@ intact convert FILE --to ascii --unmappable xml # &#233; for anything not ASCII"
                 ],
             },
             Block::Prose(
-                "Under auto, a literal (non-regex) `--find` is also rewritten, so searching for\n\
-                 'a\\nb' works on a CRLF file.",
+                "Text you search for is a different matter: it has to match the file as it\n\
+                 stands. So a literal (non-regex) `--find` - in `search`, `replace`, an `insert`\n\
+                 anchor or a `batch` op - has its terminators rewritten to the file's own\n\
+                 dominant ending under every `--eol` except keep. 'a\\nb' and 'a\\r\\nb' both\n\
+                 find the same two lines in a CRLF file, and in an LF one.",
             ),
             Block::Prose(
                 "A `--regex` pattern is not rewritten — there the same characters are syntax,\n\
@@ -623,14 +661,23 @@ intact convert FILE --to ascii --unmappable xml # &#233; for anything not ASCII"
             Block::Prose(
                 "`--strict-eol` makes any write to a file whose existing terminators are not\n\
                  the mandated ones fail with exit 5, instead of appending CRLF text to an LF\n\
-                 file and leaving it mixed. It reports the counts it found:",
+                 file and leaving it mixed. A file that consistently uses another style is not\n\
+                 the same thing as a mixed one, and the message says which it is:",
             ),
             Block::Code {
                 lang: "text",
-                text: r#"refusing to write: app.c has 2 line ending(s) that are not CRLF
-(lf=2, crlf=0, cr=0)
-hint: normalise it first: `intact convert app.c --newlines crlf`"#,
+                text: r#"refusing to write: app.c uses LF line endings throughout (622), but --eol crlf
+--strict-eol requires CRLF
+hint: converting it is a change of its own, separate from your edit: ...
+
+refusing to write: lib.c has 2 line ending(s) that are not CRLF (lf=2, crlf=40, cr=0)
+hint: normalise it first: `intact convert lib.c --newlines crlf`"#,
             },
+            Block::Prose(
+                "Converting a consistent file rewrites every line ending in it, which is a\n\
+                 decision about that file rather than part of the edit at hand. Without\n\
+                 `--strict-eol` (and with `--eol auto`) an edit follows the file instead.",
+            ),
             Block::Prose(
                 "The guard needs something to enforce, so `--eol` must be lf, crlf or cr; with\n\
                  auto or keep it is a usage error rather than a silent no-op. write, create and\n\
@@ -865,13 +912,17 @@ intact batch --script ops.json      # every op names its own file"#,
                         "replace",
                         "find, with, regex, ignore_case, all, occurrence, expect, lines, no_expand",
                     ],
-                    &["insert", "line or after, text"],
+                    &[
+                        "insert",
+                        "one of line, after, before_match or after_match; text",
+                    ],
                     &["append", "text"],
                     &["prepend", "text"],
                     &["delete", "lines"],
                     &["replace-lines", "lines, text"],
                     &["move-lines", "lines, and one of after, before or by"],
                     &["write", "text"],
+                    &["create", "text, parents (the file must not exist yet)"],
                 ],
             },
             Block::Prose(
@@ -880,8 +931,23 @@ intact batch --script ops.json      # every op names its own file"#,
                  loudly instead of being ignored.",
             ),
             Block::Prose(
-                "Text in a script is UTF-8 JSON, with normal JSON escapes — use \\n for newlines\n\
-                 rather than the `--escapes` flag.",
+                "Text in a script is UTF-8 JSON, decoded once by the JSON parser and by nothing\n\
+                 else - `--escapes` never touches it. Use \\n for a line break; \"\\\\n\" is a\n\
+                 backslash and an n in the file, which is what a C string literal needs. If a\n\
+                 real line break turns up where you wrote \"\\\\n\", a backslash was lost before\n\
+                 intact read the script: an unquoted heredoc (<<EOF rather than <<'EOF'),\n\
+                 `echo`, or any wrapper that passes the command along as an escaped string.\n\
+                 `--script FILE` sidesteps all of them, as long as the file was not itself\n\
+                 written through a shell command.",
+            ),
+            Block::Prose(
+                "\"find\", \"before_match\" and \"after_match\" follow the file's line endings, as on\n\
+                 the command line: a \\n in them matches a CRLF line end too.",
+            ),
+            Block::Prose(
+                "A \"create\" op makes a new file, so several files can be created - and edited\n\
+                 by the ops after it - in one all-or-nothing command. With \"parents\": true a\n\
+                 missing directory is made, but only once every op has succeeded.",
             ),
             Block::Heading("SEVERAL FILES IN ONE COMMAND"),
             Block::Prose(
@@ -962,18 +1028,20 @@ intact replace app.py --find 'return None' --with 'return []' --occurrence 2"#,
                 text: r#"intact insert app.py --line 1 --text 'import os'"#,
             },
             Block::Heading("INSERT RELATIVE TO AN ANCHOR, WITHOUT KNOWING A LINE NUMBER"),
-            Block::Prose(
-                "Rewrite the anchor as itself plus the new line, rather than looking the line\n\
-                 number up first:",
-            ),
             Block::Code {
                 lang: "bash",
-                text: r#"intact replace app.py --escapes \
-    --find 'import b' --with 'import b\nimport c'"#,
+                text: r#"intact insert app.py --after-match 'import b' --text 'import c'
+intact insert app.py --before-match 'def main(' --text-file - <<'EOF'
+def helper():
+    return 1
+
+EOF"#,
             },
             Block::Prose(
-                "The same trick inserts before an anchor ('...\\nimport b'), and it keeps the\n\
-                 edit anchored to content rather than to a position that may have moved.",
+                "The anchor must occur exactly once (exit 3 if missing, 4 if ambiguous); the\n\
+                 text goes in as whole lines before the line where the anchor starts, or after\n\
+                 the line where it ends. It keeps the edit anchored to content rather than to a\n\
+                 line number that may have moved since you looked.",
             ),
             Block::Heading("CREATE A FILE IN A DIRECTORY THAT DOES NOT EXIST YET"),
             Block::Code {
@@ -984,6 +1052,19 @@ intact replace app.py --find 'return None' --with 'return []' --occurrence 2"#,
                 "Without `--parents` a missing directory is an error (exit 8) rather than a\n\
                  silently created tree. `create` refuses an existing file (exit 7); use `write`\n\
                  when replacing the contents is what you meant.",
+            ),
+            Block::Heading("CREATE SEVERAL FILES AT ONCE"),
+            Block::Code {
+                lang: "bash",
+                text: r##"intact batch --script - <<'EOF'
+[{"op":"create","file":"src/foo.h","text":"#pragma once\nint foo(void);"},
+ {"op":"create","file":"src/foo.c","text":"#include \"foo.h\"\nint foo(void) { return 1; }"},
+ {"op":"append","file":"src/Makefile.inc","text":"SRC += foo.c"}]
+EOF"##,
+            },
+            Block::Prose(
+                "Nothing is created unless every op succeeds, so a mistake in the last one does\n\
+                 not leave the first files behind.",
             ),
             Block::Heading("SEVERAL CHANGES TO ONE FILE"),
             Block::Prose(
@@ -1028,7 +1109,19 @@ EOF"#,
                 lang: "bash",
                 text: r#"intact replace-lines app.py --lines 20:35 --text-file /tmp/new_block.py"#,
             },
-            Block::Heading("INSERT MULTI-LINE TEXT IN ONE ARGUMENT"),
+            Block::Heading("INSERT MULTI-LINE TEXT"),
+            Block::Prose(
+                "A quoted heredoc on standard input takes the text exactly as written, which is\n\
+                 what code full of quotes and backslashes needs:",
+            ),
+            Block::Code {
+                lang: "bash",
+                text: r#"intact insert app.py --line 1 --text-file - <<'EOF'
+import os
+import sys
+EOF"#,
+            },
+            Block::Prose("For a couple of short lines, `--escapes` fits it in one argument:"),
             Block::Code {
                 lang: "bash",
                 text: r#"intact insert app.py --line 1 --escapes --text 'import os\nimport sys'"#,

@@ -134,6 +134,7 @@ output is `path:line:column:line-text`.
 intact replace FILE --find TEXT --with TEXT
 intact insert  FILE --line N   --text TEXT      # insert before line N
 intact insert  FILE --after N  --text TEXT      # insert after line N
+intact insert  FILE --after-match TEXT --text TEXT   # or --before-match: by content
 intact append  FILE --text TEXT
 intact prepend FILE --text TEXT
 intact delete  FILE --lines 10:20

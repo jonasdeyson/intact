@@ -69,6 +69,18 @@ pub fn read_stdin() -> Result<String> {
         .map_err(|_| AppError::new(ErrorKind::Encoding, "standard input is not valid UTF-8"))
 }
 
+/// Drop one trailing line terminator (`\r\n`, `\n` or `\r`), if there is one.
+///
+/// A file or heredoc always ends its last line, so text read from one carries
+/// a terminator the caller may never have meant as part of the text.
+pub fn trim_one_eol(s: &mut String) {
+    if s.ends_with("\r\n") {
+        s.truncate(s.len() - 2);
+    } else if s.ends_with(['\n', '\r']) {
+        s.truncate(s.len() - 1);
+    }
+}
+
 /// Interpret C-style backslash escapes so that multi-line text survives shells
 /// and JSON-free argument passing.
 pub fn unescape(s: &str) -> Result<String> {
@@ -154,5 +166,21 @@ mod tests {
         assert_eq!(unescape(r"\xE9").unwrap(), "é");
         assert!(unescape(r"a\").is_err());
         assert!(unescape(r"\q").is_err());
+    }
+
+    #[test]
+    fn trims_one_terminator() {
+        for (input, want) in [
+            ("a\r\n", "a"),
+            ("a\n", "a"),
+            ("a\r", "a"),
+            ("a\n\n", "a\n"),
+            ("a", "a"),
+            ("", ""),
+        ] {
+            let mut s = input.to_string();
+            trim_one_eol(&mut s);
+            assert_eq!(s, want, "{input:?}");
+        }
     }
 }

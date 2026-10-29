@@ -5,6 +5,49 @@ All notable changes to this project are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-29
+
+### Added
+
+- `insert --after-match TEXT` and `--before-match TEXT` insert whole lines next
+  to the line holding a unique piece of text, so an insert no longer needs a
+  line number looked up first, or the replace-the-anchor-with-itself trick. The
+  anchor follows the same rules as `replace`: exit 3 when it is missing, exit 4
+  when it is ambiguous. `batch` takes them as `before_match` / `after_match`.
+- A `create` op in `batch`, with an optional `parents`, so several new files can
+  be created, and edited by the ops after them, in one all-or-nothing command.
+  A missing directory is made only once every op has succeeded.
+- The manual and `intact instructions` recommend a quoted heredoc on standard
+  input (`--text-file - <<'EOF'`) for multi-line text, and the batch topic
+  states that script text is decoded by JSON once and by nothing else. Both
+  also say what to do when something above the shell (an agent harness, say)
+  halves backslashes before a heredoc is read: check `--show-diff`, and pass
+  the text in a file that no shell command wrote.
+- `intact instructions` now says when other tools are safe for reading: fine for
+  UTF-8 files and ASCII text, but tools that assume UTF-8 garble non-ASCII text
+  in a legacy-encoded file and come back empty when searching for it, so that
+  text is read through `view` and `search`. It also says that `--eol` and
+  `--strict-eol` are needed only on commands that write, while a mandated
+  `--encoding` applies to reads too.
+
+### Changed
+
+- When exactly one side of `replace` comes from a file (`--find-file` or
+  `--with-file`) and only that side ends in a line terminator, that terminator
+  is dropped. A heredoc always ends its last line, so
+  `--find 'anchor' --with-file - <<'EOF'` used to leave a blank line under the
+  replacement.
+- A literal search text (`search`, `replace`, insert anchors, `batch`) now
+  follows the file's own line endings under every `--eol` except `keep`.
+  Previously it followed `--eol`, so `--eol lf` on a CRLF file could never match
+  a multi-line `--find`.
+- `--strict-eol` on a file that consistently uses another style now says so
+  ("uses LF line endings throughout") instead of counting its line endings as
+  if the file were mixed. The hint also says that converting the file is a
+  change of its own.
+- The refusal of `no_expand` without `regex` says what the field controls
+  (`$1` / `${name}` expansion) and that a plain replacement expands nothing.
+
 ## [0.4.0] - 2026-08-16
 
 ### Added
@@ -294,7 +337,8 @@ can make a whole changeset.
 
 Initial release.
 
-[0.4.0]: https://github.com/jonasdeyson/intact/compare/v0.4.0...v0.3.0
+[0.5.0]: https://github.com/jonasdeyson/intact/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/jonasdeyson/intact/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jonasdeyson/intact/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jonasdeyson/intact/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jonasdeyson/intact/releases/tag/v0.1.0

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use crate::atomic::ensure_parent_dir;
 use crate::cli::{self, Cli};
 use crate::diff;
 use crate::document::{Document, ForcedEncoding};
@@ -58,6 +59,10 @@ enum BatchOp {
         line: Option<Value>,
         #[serde(default)]
         after: Option<Value>,
+        #[serde(default)]
+        before_match: Option<String>,
+        #[serde(default)]
+        after_match: Option<String>,
         text: String,
     },
     Append {
@@ -99,6 +104,13 @@ enum BatchOp {
         file: Option<PathBuf>,
         text: String,
     },
+    Create {
+        #[serde(default)]
+        file: Option<PathBuf>,
+        text: String,
+        #[serde(default)]
+        parents: bool,
+    },
 }
 
 impl BatchOp {
@@ -111,7 +123,8 @@ impl BatchOp {
             | BatchOp::Delete { file, .. }
             | BatchOp::ReplaceLines { file, .. }
             | BatchOp::MoveLines { file, .. }
-            | BatchOp::Write { file, .. } => file,
+            | BatchOp::Write { file, .. }
+            | BatchOp::Create { file, .. } => file,
         };
         file.as_deref()
     }
@@ -187,11 +200,51 @@ pub fn run(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -> 
             }
         };
 
+        let creating = match op {
+            BatchOp::Create { parents, .. } => Some(*parents),
+            _ => None,
+        };
         let slot = match targets.iter().position(|t| t.original.path == path) {
+            // An earlier op already read or created it, so it exists by now
+            // as far as this script is concerned.
+            Some(_) if creating.is_some() => {
+                return Err(AppError::new(
+                    ErrorKind::Exists,
+                    format!(
+                        "operation {} ({}): an earlier operation in this script already \
+                         touches this file, so it cannot be created",
+                        i + 1,
+                        path.display()
+                    ),
+                ));
+            }
             Some(idx) => idx,
             None => {
-                let original = Document::load(&path, forced, binary_policy(cli))?;
-                preflight(cli, &original)?;
+                let original = if let Some(parents) = creating {
+                    let doc = Document::load_or_empty(&path, forced, binary_policy(cli))?;
+                    if doc.existed {
+                        return Err(AppError::new(
+                            ErrorKind::Exists,
+                            format!(
+                                "operation {} ({}): file already exists",
+                                i + 1,
+                                path.display()
+                            ),
+                        )
+                        .with_hint("use a \"write\" op to replace its contents"));
+                    }
+                    // A missing directory without `parents` fails now, with
+                    // the rest of the script; creating one waits for the write
+                    // phase, so a script that fails leaves no directory behind.
+                    if !parents {
+                        ensure_parent_dir(&path, false)?;
+                    }
+                    doc
+                } else {
+                    let doc = Document::load(&path, forced, binary_policy(cli))?;
+                    preflight(cli, &doc)?;
+                    doc
+                };
                 // Pin the encoding so re-decoding between steps cannot drift,
                 // keeping the original source so `detected_by` stays truthful.
                 let pinned = Some(ForcedEncoding {
@@ -205,6 +258,7 @@ pub fn run(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -> 
                     current,
                     ops: 0,
                     undeclared: None,
+                    parents: creating.unwrap_or(false),
                 });
                 targets.len() - 1
             }
@@ -244,7 +298,8 @@ pub fn run(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -> 
     let mut any_changed = false;
 
     for target in &targets {
-        let changed = target.current != target.original.raw;
+        // A new file is written even when its content is empty.
+        let changed = target.current != target.original.raw || !target.original.existed;
         any_changed |= changed;
         let final_doc = Document::from_bytes(
             target.original.path.clone(),
@@ -264,6 +319,11 @@ pub fn run(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -> 
         report.dry_run = cli.dry_run;
         report.bytes_after = target.current.len();
         report.lines_after = final_doc.lines().count();
+        if !target.original.existed {
+            // A new file has no endings of its own to report; name the ones it
+            // ends up with.
+            report.eol = lines::detect_eol(&final_doc.text).0.name();
+        }
         report.details = json!({ "operations": target.ops });
 
         // Each step re-edits the result of the last, so the spans of any one of
@@ -271,14 +331,17 @@ pub fn run(cli: &Cli, args: &cli::BatchArgs, forced: Option<ForcedEncoding>) -> 
         // is the only honest account of a batch.
         if wants_diff(cli) {
             let diff = diff::from_texts(&target.original.text, &final_doc.text, cli.diff_context);
-            emit_diff(cli, &mut report, &diff, true, changed);
+            emit_diff(cli, &mut report, &diff, target.original.existed, changed);
         }
         file_reports.push(report);
     }
 
     if !cli.dry_run {
         for target in &targets {
-            if target.current != target.original.raw {
+            if target.current != target.original.raw || !target.original.existed {
+                if target.parents {
+                    ensure_parent_dir(&target.original.path, true)?;
+                }
                 target.original.save(&target.current, cli.backup)?;
             }
         }
@@ -325,6 +388,8 @@ struct BatchTarget {
     /// The first non-ASCII character the script writes into a file whose
     /// encoding was never observed, if it writes one.
     undeclared: Option<char>,
+    /// Created by a `create` op with `parents`: make its directory on write.
+    parents: bool,
 }
 
 /// The op's `file` has already been resolved into `doc` by the caller, so it is
@@ -369,12 +434,16 @@ fn apply_batch_op(doc: &Document, op: &BatchOp, ctx: Ctx) -> Result<OpOutcome> {
             file: _,
             line,
             after,
+            before_match,
+            after_match,
             text,
         } => {
             let args = cli::InsertArgs {
                 file: doc.path.clone(),
                 line: line.as_ref().map(as_spec).transpose()?,
                 after: after.as_ref().map(as_spec).transpose()?,
+                before_match: before_match.clone(),
+                after_match: after_match.clone(),
                 text: no_text,
             };
             ops::insert(doc, &args, text, ctx)
@@ -419,6 +488,8 @@ fn apply_batch_op(doc: &Document, op: &BatchOp, ctx: Ctx) -> Result<OpOutcome> {
             };
             ops::move_lines(doc, &args, ctx)
         }
-        BatchOp::Write { file: _, text } => ops::write_all(doc, text, ctx, true),
+        BatchOp::Write { file: _, text } | BatchOp::Create { file: _, text, .. } => {
+            ops::write_all(doc, text, ctx, true)
+        }
     }
 }

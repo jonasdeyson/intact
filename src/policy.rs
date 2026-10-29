@@ -115,17 +115,43 @@ fn check_eol_mandate(cli: &Cli, doc: &Document) -> Result<()> {
         return Ok(());
     }
 
-    Err(AppError::new(
-        ErrorKind::Encoding,
-        format!(
-            "refusing to write: {} has {offending} line ending(s) that are not {} (lf={lf}, crlf={crlf}, cr={cr})",
-            doc.path.display(),
-            want.name().to_uppercase()
+    let want_name = want.name().to_uppercase();
+    // A file that is consistently some other style is not mixed, and saying it
+    // "has N line endings that are not CRLF" makes it sound damaged. It is just
+    // not following the mandate, and converting it is a change of its own.
+    let only = [(Eol::Lf, lf), (Eol::CrLf, crlf), (Eol::Cr, cr)]
+        .into_iter()
+        .filter(|&(_, n)| n > 0)
+        .collect::<Vec<_>>();
+    let (message, hint) = match only.as_slice() {
+        [(style, n)] => (
+            format!(
+                "refusing to write: {} uses {} line endings throughout ({n}), but --eol {} \
+                 --strict-eol requires {want_name}",
+                doc.path.display(),
+                style.name().to_uppercase(),
+                want.name()
+            ),
+            format!(
+                "converting it is a change of its own, separate from your edit: \
+                 `intact convert {} --newlines {}`; if the file is a deliberate exception, ask \
+                 before editing it without --strict-eol",
+                doc.path.display(),
+                want.name()
+            ),
         ),
-    )
-    .with_hint(format!(
-        "normalise it first: `intact convert {} --newlines {}`",
-        doc.path.display(),
-        want.name()
-    )))
+        _ => (
+            format!(
+                "refusing to write: {} has {offending} line ending(s) that are not {want_name} \
+                 (lf={lf}, crlf={crlf}, cr={cr})",
+                doc.path.display()
+            ),
+            format!(
+                "normalise it first: `intact convert {} --newlines {}`",
+                doc.path.display(),
+                want.name()
+            ),
+        ),
+    };
+    Err(AppError::new(ErrorKind::Encoding, message).with_hint(hint))
 }

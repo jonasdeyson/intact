@@ -212,10 +212,17 @@ pub enum Command {
         long_about = "Insert text as whole lines, before --line N or after --after N.\n\n\
                       A line terminator is added if the text lacks one, matching the file's \
                       dominant line ending. --line accepts one past the last line, meaning \
-                      \"start a new line at the end of the file\".",
+                      \"start a new line at the end of the file\".\n\n\
+                      --before-match TEXT and --after-match TEXT name the line by its content \
+                      instead: the text must occur exactly once (exit 3 if it is missing, 4 if \
+                      it is ambiguous), and the insert goes before the line where it starts or \
+                      after the line where it ends. No line number to look up, and nothing to \
+                      go stale between reading the file and editing it.",
         after_help = "EXAMPLES:\n  \
                       intact insert app.py --line 1 --text 'import os'\n  \
                       intact insert app.py --after 40 --text-file /tmp/block.py\n  \
+                      intact insert app.py --after-match 'import sys' --text 'import re'\n  \
+                      gen_block | intact insert app.py --before-match 'def main(' --text-file -\n  \
                       intact insert app.py --line 1 --escapes --text 'import os\\nimport sys'\n"
     )]
     Insert(InsertArgs),
@@ -611,12 +618,12 @@ pub struct ReplaceArgs {
     pub no_expand: bool,
 }
 
-/// An insert has to say where, so `--line` and `--after` are one required
-/// group rather than two options that happen to be checked once the file is
-/// already open. (`batch` builds these args from JSON, which clap never sees,
-/// so `ops::insert` still checks for itself.)
+/// An insert has to say where, so `--line`, `--after` and the two anchor forms
+/// are one required group rather than options that happen to be checked once
+/// the file is already open. (`batch` builds these args from JSON, which clap
+/// never sees, so `ops::insert` still checks for itself.)
 #[derive(Args, Debug)]
-#[command(group = ArgGroup::new("at").required(true).args(["line", "after"]))]
+#[command(group = ArgGroup::new("at").required(true).args(["line", "after", "before_match", "after_match"]))]
 pub struct InsertArgs {
     /// File to edit
     pub file: PathBuf,
@@ -628,6 +635,14 @@ pub struct InsertArgs {
     /// Insert after this line
     #[arg(long, short = 'a', value_name = "LINE", allow_hyphen_values = true)]
     pub after: Option<LineSpec>,
+
+    /// Insert before the line where this text (which must be unique) starts
+    #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+    pub before_match: Option<String>,
+
+    /// Insert after the line where this text (which must be unique) ends
+    #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+    pub after_match: Option<String>,
 
     #[command(flatten)]
     pub text: TextSource,
